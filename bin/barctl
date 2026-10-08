@@ -1,0 +1,118 @@
+#!/bin/bash
+# barctl — manage which plugins show in the Omarchy bar.
+#   barctl list                 JSON for the UI
+#   barctl enable|disable <id>  turn a plugin on/off (disable also takes it off the bar)
+#   barctl update <id>|--all    omarchy plugin update
+#   barctl uninstall <id>       omarchy plugin remove
+#   barctl hide <id>            take off the bar, keep installed + enabled
+#   barctl show <id>            put back on the bar (same spot it was hidden from)
+#   barctl fix                  drop duplicate tray entries
+set -euo pipefail
+
+CFG="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-hidden.json"
+
+backup() { cp -f "$CFG" "$CFG.bak.barctl-$(date +%s)"; ls -t "$CFG".bak.barctl-* 2>/dev/null | tail -n +6 | xargs -r rm -f; }
+
+# jq: collapse repeated tray wrappers / order tokens (the cause of doubled icons).
+DEDUPE='
+  def uniq_by_key(f): reduce .[] as $x ([]; if any(.[]; f == ($x | f)) then . else . + [$x] end);
+  def uniq_tokens: reduce .[] as $x ([]; if index($x) != null then . else . + [$x] end);
+  .bar.layout |= with_entries(.value |= map(
+    if .widgets then .widgets |= uniq_by_key(.entry.id) else . end
+    | if .order then .order |= uniq_tokens else . end))'
+
+apply() {  # apply <jq filter> [jq args...]
+  local filter="$1"; shift
+  local tmp; tmp=$(mktemp)
+  jq "$@" "$filter | $DEDUPE" "$CFG" >"$tmp"
+  backup
+  mv "$tmp" "$CFG"
+}
+
+state_get() { [[ -f $STATE ]] && jq -c --arg id "$1" '.[$id] // empty' "$STATE" || true; }
+state_set() { local cur='{}'; [[ -f $STATE ]] && cur=$(cat "$STATE"); jq --arg id "$1" --argjson v "$2" '.[$id]=$v' <<<"$cur" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
+state_del() { [[ -f $STATE ]] && jq --arg id "$1" 'del(.[$id])' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE" || true; }
+
+on_bar() {  # on_bar <id> -> 0 if on bar (top-level or tray-hosted)
+  jq -e --arg id "$1" '[.bar.layout[][] | ., (.widgets? // [] | .[] | .entry)] | any(.id == $id)' "$CFG" >/dev/null
+}
+
+cmd_hide() {
+  local id="$1" where
+  where=$(jq -c --arg id "$1" '
+    .bar.layout as $l
+    | ([$l | to_entries[] | .key as $s | .value | to_entries[] | select(.value.id == $id) | {section: $s, index: .key}] | first) as $top
+    | ([$l[][] | select(.widgets) | select(any(.widgets[]; .entry.id == $id)) | .id] | first) as $tray
+    | if $tray then {tray: $tray} elif $top then $top else null end' "$CFG")
+  [[ $where != null ]] || { echo "$id is not on the bar"; return 0; }
+  state_set "$id" "$where"
+  apply '
+    .bar.layout |= with_entries(.value |= (
+      map(select(.id != $id))
+      | map(if .widgets then
+              .widgets |= map(select(.entry.id != $id))
+              | (if .order then .order |= map(select(. != $id)) else . end)
+            else . end)))' --arg id "$id"
+  echo "Removed $id from bar (still installed)"
+}
+
+cmd_show() {
+  local id="$1" where tray
+  if on_bar "$id"; then echo "$id is already on the bar"; return 0; fi
+  where=$(state_get "$id")
+  tray=$(jq -r '.tray // empty' <<<"${where:-{\}}")
+  if [[ -n $tray ]]; then
+    apply '
+      (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
+      | .bar.layout |= with_entries(.value |= map(
+          if .id == $tray then .widgets = ((.widgets // []) + [{entry: {id: $id}}]) else . end))' \
+      --arg id "$id" --arg tray "$tray"
+  else
+    local sect; sect=$(jq -r '.section // empty' <<<"${where:-{\}}")
+    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+    if [[ -n $sect ]]; then omarchy bar put "$id" --section "$sect"; else omarchy bar put "$id"; fi
+  fi
+  state_del "$id"
+  echo "Added $id to bar"
+}
+
+cmd_list() {
+  local cat; cat=$(omarchy-plugin-catalog)
+  omarchy plugin list --json | jq --argjson cat "$cat" --slurpfile c "$CFG" --slurpfile h <([[ -f $STATE ]] && cat "$STATE" || echo '{}') '
+    ($c[0].bar.layout // {}) as $l
+    | [ $l | to_entries[] | .key as $s | .value[] | {id, section: $s} ] as $top
+    | [ $l | to_entries[] | .value[] | .widgets? // [] | .[] | {id: .entry.id, section: "tray"} ] as $tray
+    | ($top + $tray) as $onbar
+    | ($cat | map({key: .id, value: .}) | from_entries) as $meta
+    | [ .[] | select(.kinds | index("bar-widget"))
+        | . as $x
+        | ($onbar | map(select(.id == $x.id)) | first) as $b
+        | ($meta[$x.id] // {}) as $m
+        | { id, name, firstParty,
+            enabled: (.enabled or ($b != null)),
+            onBar: ($b != null), section: ($b.section // ""),
+            canManage: (.firstParty | not),
+            description: ($m.description // ""),
+            category: ($m.barWidget.category // ""),
+            aliases: ($m.barWidget.aliases // []) } ]
+    | sort_by(.name | ascii_downcase)'
+}
+
+id="${2:-}"
+case "${1:-}" in
+  list) cmd_list ;;
+  fix) apply '.' ; echo "Removed duplicate tray entries" ;;
+  enable)
+    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+    on_bar "$id" || cmd_show "$id" >/dev/null
+    echo "Enabled $id" ;;
+  disable)
+    cmd_hide "$id" >/dev/null
+    omarchy plugin disable "$id" ;;
+  update) if [[ $id == --all ]]; then omarchy plugin update --yes; else omarchy plugin update "$id" --yes; fi ;;
+  uninstall) cmd_hide "$id" >/dev/null || true; state_del "$id"; omarchy plugin remove "$id" --yes ;;
+  hide) cmd_hide "$id" ;;
+  show) cmd_show "$id" ;;
+  *) echo "usage: barctl list|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
+esac
