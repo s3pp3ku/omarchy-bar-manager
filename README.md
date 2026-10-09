@@ -67,6 +67,8 @@ bin/barctl disable <plugin-id>   # also takes it off the bar
 bin/barctl update <plugin-id>    # or: update --all
 bin/barctl uninstall <plugin-id>
 bin/barctl place <plugin-id> <top|bottom|left|right> [left|center|right]
+bin/barctl togglebar <top|bottom|left|right>   # add/remove an empty extra bar
+bin/barctl mainpos <top|bottom|left|right>     # move the main bar (an extra bar there swaps places)
 bin/barctl fix                   # drop duplicate tray entries
 ```
 
