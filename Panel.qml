@@ -181,7 +181,7 @@ Item {
         id: window
         title: "Bar Manager"
         color: root.bg
-        implicitWidth: 640
+        implicitWidth: 860
         implicitHeight: 720
         minimumSize: Qt.size(560, 400)
 
@@ -238,7 +238,8 @@ Item {
                     spacing: 6
                     Text { text: "BAR"; Layout.preferredWidth: 28; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "PLUGIN"; Layout.fillWidth: true; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "ACTIONS"; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
+                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 235; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
+                    Text { text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
 
@@ -260,6 +261,11 @@ Item {
 
                         Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.35) }
 
+                        function curSection() {
+                            var sec = row.modelData.section || ""
+                            if (sec.indexOf("/") >= 0) return sec.split("/")[1]
+                            return ["left", "center", "right"].indexOf(sec) >= 0 ? sec : "right"
+                        }
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 6; anchors.rightMargin: 6
@@ -289,36 +295,59 @@ Item {
                                 }
                             }
 
-                            Btn {
-                                label: row.modelData.onBar ? "Hide" : "Show"
-                                onClicked: root.act([row.modelData.onBar ? "hide" : "show", row.modelData.id], row.modelData.onBar ? "Hiding" : "Showing")
-                            }
-                            Btn {
-                                label: "Bar:" + (row.modelData.bar || "top")
-                                onClicked: {
-                                    var order = ["top", "bottom", "left", "right"]
-                                    var next = order[(order.indexOf(row.modelData.bar || "top") + 1) % order.length]
-                                    var sect = row.modelData.section.indexOf("/") >= 0 ? row.modelData.section.split("/")[1]
-                                             : (["left", "center", "right"].indexOf(row.modelData.section) >= 0 ? row.modelData.section : "right")
-                                    root.act(["place", row.modelData.id, next, sect], "Moving to " + next)
+                            // Pick the bar (Top / Bottom / Left / Right) and the section (left / center / right).
+                            Row {
+                                spacing: 2
+                                Repeater {
+                                    model: [{ k: "top", t: "T" }, { k: "bottom", t: "B" }, { k: "left", t: "L" }, { k: "right", t: "R" }]
+                                    Btn {
+                                        required property var modelData
+                                        label: modelData.t
+                                        picked: row.modelData.onBar && (row.modelData.bar || "top") === modelData.k
+                                        tip: "Show on the " + modelData.k + " bar"
+                                        onClicked: {
+                                            if (picked && row.modelData.section === "tray") return
+                                            root.act(["place", row.modelData.id, modelData.k, row.curSection()], "Moving to " + modelData.k)
+                                        }
+                                    }
                                 }
                             }
-                            Btn {
-                                label: row.modelData.enabled ? "Disable" : "Enable"
-                                onClicked: root.act([row.modelData.enabled ? "disable" : "enable", row.modelData.id], row.modelData.enabled ? "Disabling" : "Enabling")
+                            Row {
+                                spacing: 2
+                                Repeater {
+                                    model: [{ k: "left", t: "‹" }, { k: "center", t: "·" }, { k: "right", t: "›" }]
+                                    Btn {
+                                        required property var modelData
+                                        label: modelData.t
+                                        picked: row.modelData.onBar && row.curSection() === modelData.k && row.modelData.section !== "tray"
+                                        onClicked: root.act(["place", row.modelData.id, row.modelData.onBar ? (row.modelData.bar || "top") : "top", modelData.k], "Moving")
+                                    }
+                                }
                             }
-                            Btn {
-                                visible: row.modelData.canManage
-                                label: "Update"
-                                onClicked: root.act(["update", row.modelData.id], "Updating")
-                            }
-                            Btn {
-                                visible: row.modelData.canManage
-                                danger: true
-                                label: root.confirmId === row.modelData.id ? "Sure?" : "Uninstall"
-                                onClicked: {
-                                    if (root.confirmId === row.modelData.id) root.act(["uninstall", row.modelData.id], "Uninstalling")
-                                    else root.confirmId = row.modelData.id
+                            Row {
+                                Layout.preferredWidth: 215
+                                spacing: 4
+                                Btn {
+                                    label: row.modelData.onBar ? "Hide" : "Show"
+                                    onClicked: root.act([row.modelData.onBar ? "hide" : "show", row.modelData.id], row.modelData.onBar ? "Hiding" : "Showing")
+                                }
+                                Btn {
+                                    label: row.modelData.enabled ? "Off" : "On"
+                                    onClicked: root.act([row.modelData.enabled ? "disable" : "enable", row.modelData.id], row.modelData.enabled ? "Disabling" : "Enabling")
+                                }
+                                Btn {
+                                    visible: row.modelData.canManage
+                                    label: "Upd"
+                                    onClicked: root.act(["update", row.modelData.id], "Updating")
+                                }
+                                Btn {
+                                    visible: row.modelData.canManage
+                                    danger: true
+                                    label: root.confirmId === row.modelData.id ? "Sure?" : "Del"
+                                    onClicked: {
+                                        if (root.confirmId === row.modelData.id) root.act(["uninstall", row.modelData.id], "Uninstalling")
+                                        else root.confirmId = row.modelData.id
+                                    }
                                 }
                             }
                         }
@@ -329,7 +358,7 @@ Item {
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
                 Text {
                     Layout.fillWidth: true
-                    text: root.status !== "" ? root.status : "Esc closes.  [x] = shown on bar.  Bar: click to move top→bottom→left→right."
+                    text: root.status !== "" ? root.status : "Esc closes.  [x] = shown on bar.  Pick a bar (T B L R) and a section (‹ · ›) for any plugin."
                     elide: Text.ElideRight
                     color: root.status === "" ? root.dim : (root.statusOk ? root.accent : root.bad)
                     font.family: root.mono; font.pixelSize: 12
@@ -343,11 +372,13 @@ Item {
         id: btn
         property string label: ""
         property bool danger: false
+        property bool picked: false
+        property string tip: ""
         signal clicked()
         readonly property color tone: danger ? root.bad : root.fg
         implicitWidth: txt.implicitWidth + 12
         implicitHeight: 22
-        color: ma.containsMouse ? tone : "transparent"
+        color: (ma.containsMouse || picked) ? tone : "transparent"
         border.color: tone
         border.width: 1
         opacity: root.busy ? 0.5 : 1
@@ -355,7 +386,7 @@ Item {
             id: txt
             anchors.centerIn: parent
             text: btn.label
-            color: ma.containsMouse ? root.bg : btn.tone
+            color: (ma.containsMouse || btn.picked) ? root.bg : btn.tone
             font.family: root.mono; font.pixelSize: 11
         }
         MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; enabled: !root.busy; onClicked: btn.clicked() }
