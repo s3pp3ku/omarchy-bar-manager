@@ -240,6 +240,7 @@ case "${1:-}" in
   hide) cmd_hide "$id" ;;
   togglebar) cmd_togglebar "$id" ;;
   hasbar) extra_has "$id" ;;
+  hasedge) [[ $id == "$(main_pos)" ]] || extra_has "$id" ;;
   mainpos) cmd_mainpos "$id" ;;
   swapbars) cmd_swapbars "$id" "${3:-}" ;;
   place) cmd_place "$id" "${3:-}" "${4:-right}" ;;
