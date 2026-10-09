@@ -137,26 +137,54 @@ cmd_show() {
 extra_has() { [[ -f $EXTRA ]] && jq -e --arg p "$1" 'any(.bars[]?; .position == $p)' "$EXTRA" >/dev/null; }
 main_pos() { jq -r '.bar.position // "top"' "$CFG"; }
 
-cmd_togglebar() {  # add an empty extra bar on an edge, or remove it (its widgets go off the bar)
-  local pos="$1" tmp; tmp=$(mktemp)
+BARS_SAVED="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-removed-bars.json"
+
+cmd_togglebar() {  # add an extra bar on an edge, or remove it. A removed bar's widgets are remembered and come back when the bar is re-added.
+  local pos="$1" tmp saved; tmp=$(mktemp)
   case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
   [[ $pos != "$(main_pos)" ]] || { echo "$pos is the main bar"; return 0; }
   [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
+  mkdir -p "$(dirname "$BARS_SAVED")"; [[ -f $BARS_SAVED ]] || echo '{}' >"$BARS_SAVED"
   if extra_has "$pos"; then
+    # remember its widgets (only if there are any), then drop the bar
+    jq --arg p "$pos" --slurpfile x "$EXTRA" '
+      ($x[0].bars[]? | select(.position == $p)) as $b
+      | if (($b.left + $b.center + $b.right) | length) > 0 then .[$p] = ($b | del(.position)) else . end' "$BARS_SAVED" >"$tmp" && mv "$tmp" "$BARS_SAVED"
+    tmp=$(mktemp)
     jq --arg p "$pos" '.bars |= map(select(.position != $p))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-    echo "Removed the $pos bar"
+    echo "Removed the $pos bar (its widgets are remembered)"
   else
-    jq --arg p "$pos" '.bars = ((.bars // []) + [{position: $p, left: [], center: [], right: []}])' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-    echo "Added a $pos bar"
+    saved=$(jq -c --arg p "$pos" '.[$p] // empty' "$BARS_SAVED")
+    jq --arg p "$pos" --argjson s "${saved:-null}" '
+      .bars = ((.bars // []) + [ {position: $p, left: [], center: [], right: []} + ($s // {}) ])' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+    if [[ -n $saved ]]; then
+      tmp=$(mktemp); jq --arg p "$pos" 'del(.[$p])' "$BARS_SAVED" >"$tmp" && mv "$tmp" "$BARS_SAVED"
+      echo "Added a $pos bar with its remembered widgets"
+    else
+      echo "Added a $pos bar"
+    fi
   fi
 }
 
-cmd_mainpos() {  # move the main bar; an extra bar already on that edge swaps to the old edge
+cmd_mainpos() {  # move the main bar to an edge; a bar already there swaps to the main bar's old edge (nobody loses widgets)
   local pos="$1" old tmp; old=$(main_pos); tmp=$(mktemp)
-  if [[ $pos != "$old" ]] && extra_has "$pos"; then
+  [[ $pos != "$old" ]] || return 0
+  if extra_has "$pos"; then
     jq --arg p "$pos" --arg o "$old" '.bars |= map(if .position == $p then .position = $o else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
   fi
   omarchy-bar position "$pos"
+}
+
+cmd_swapbars() {  # swap any two bars (main or extra) by their edges: barctl swapbars <edge> <edge>
+  local a="$1" b="$2" tmp; tmp=$(mktemp)
+  for e in "$a" "$b"; do case "$e" in top|bottom|left|right) ;; *) echo "edges must be top, bottom, left or right" >&2; exit 1 ;; esac; done
+  [[ $a != "$b" ]] || return 0
+  local main; main=$(main_pos)
+  if [[ $a == "$main" ]]; then cmd_mainpos "$b"; return; fi
+  if [[ $b == "$main" ]]; then cmd_mainpos "$a"; return; fi
+  extra_has "$a" || extra_has "$b" || { echo "neither edge has a bar"; return 0; }
+  jq --arg a "$a" --arg b "$b" '.bars |= map(if .position == $a then .position = $b elif .position == $b then .position = $a else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+  echo "Swapped the $a and $b bars"
 }
 
 cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
@@ -213,6 +241,7 @@ case "${1:-}" in
   togglebar) cmd_togglebar "$id" ;;
   hasbar) extra_has "$id" ;;
   mainpos) cmd_mainpos "$id" ;;
+  swapbars) cmd_swapbars "$id" "${3:-}" ;;
   place) cmd_place "$id" "${3:-}" "${4:-right}" ;;
   show) cmd_show "$id" ;;
   *) echo "usage: barctl list|place|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
