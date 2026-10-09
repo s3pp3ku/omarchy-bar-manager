@@ -29,6 +29,7 @@ Omarchy's CLI can enable, disable and remove plugins, but has no "take it off th
 - **Theme-aware**: simple flat, monospace look that follows your current Omarchy theme colors.
 - **Every bar**: works with the main bar and with [Extra Bars](https://github.com/s3pp3ku/omarchy-extra-bars). Each row has pickers for the bar (T B L R) and the section (‹ · ›), for installed or not-yet-shown plugins alike. Removing an extra bar remembers its widgets, so adding it back restores them. Moving the main bar to an edge that already has a bar swaps the two, so nothing is lost.
 - **Service widgets placed correctly**: widgets that ship a background service (e.g. Keylight) are put directly on a bar, never inside the tray, where they would be invisible.
+- **Trays**: `+ Tray` adds a new empty tray (any number, on any extra bar). The `▢` button on each row puts a widget into a tray and cycles through them; trays move between bars and sections with the same pickers.
 - **Scriptable**: everything the panel does is available from the terminal via `bin/barctl`.
 
 ## Requirements
@@ -70,6 +71,9 @@ bin/barctl place <plugin-id> <top|bottom|left|right> [left|center|right]
 bin/barctl togglebar <top|bottom|left|right>   # add/remove an empty extra bar
 bin/barctl mainpos <top|bottom|left|right>     # move the main bar (an extra bar there swaps places)
 bin/barctl swapbars <edge> <edge>              # swap any two bars (main or extra) between edges, widgets stay with their bar
+bin/barctl addtray <edge|auto> [section]        # new empty tray on an extra bar
+bin/barctl intray <plugin-id> <tray-id>        # put a widget in a tray (place takes it back out)
+bin/barctl rmtray <tray-id>                    # remove a tray; its widgets stay on the bar
 bin/barctl fix                   # drop duplicate tray entries
 ```
 

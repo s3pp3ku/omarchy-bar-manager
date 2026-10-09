@@ -208,6 +208,7 @@ Item {
                         color: root.dim; font.family: root.mono; font.pixelSize: 12
                     }
                     Item { Layout.fillWidth: true }
+                    Btn { label: "+ Tray"; onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
                     Btn { label: "Update all"; onClicked: root.act(["update", "--all"], "Updating all") }
                     Btn { label: "Refresh"; onClicked: root.refresh() }
                 }
@@ -238,7 +239,7 @@ Item {
                     spacing: 6
                     Text { text: "BAR"; Layout.preferredWidth: 28; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "PLUGIN"; Layout.fillWidth: true; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 235; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
+                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 280; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
@@ -324,14 +325,30 @@ Item {
                                     }
                                 }
                             }
+                            Btn {
+                                visible: !row.modelData.isTray
+                                label: row.modelData.tray ? "▣" + row.modelData.tray.replace("tray:", "") : "▢"
+                                picked: !!row.modelData.tray
+                                onClicked: {
+                                    // cycle: none -> first tray -> next tray ... -> none (back onto the bar)
+                                    var trays = []
+                                    for (var i = 0; i < root.items.length; i++) if (root.items[i].isTray) trays.push(root.items[i].id)
+                                    if (trays.length === 0) { root.status = "Add a tray first (+ Tray)"; root.statusOk = false; return }
+                                    var cur = trays.indexOf(row.modelData.tray)
+                                    if (cur + 1 < trays.length) root.act(["intray", row.modelData.id, trays[cur + 1]], "Putting in " + trays[cur + 1])
+                                    else root.act(["place", row.modelData.id, row.modelData.bar || "bottom", row.curSection()], "Taking out of tray")
+                                }
+                            }
                             Row {
                                 Layout.preferredWidth: 215
                                 spacing: 4
                                 Btn {
+                                    visible: !row.modelData.isTray
                                     label: row.modelData.onBar ? "Hide" : "Show"
                                     onClicked: root.act([row.modelData.onBar ? "hide" : "show", row.modelData.id], row.modelData.onBar ? "Hiding" : "Showing")
                                 }
                                 Btn {
+                                    visible: !row.modelData.isTray
                                     label: row.modelData.enabled ? "Off" : "On"
                                     onClicked: root.act([row.modelData.enabled ? "disable" : "enable", row.modelData.id], row.modelData.enabled ? "Disabling" : "Enabling")
                                 }
@@ -339,6 +356,12 @@ Item {
                                     visible: row.modelData.canManage
                                     label: "Upd"
                                     onClicked: root.act(["update", row.modelData.id], "Updating")
+                                }
+                                Btn {
+                                    visible: row.modelData.isTray === true
+                                    danger: true
+                                    label: "Del"
+                                    onClicked: root.act(["rmtray", row.modelData.id], "Removing tray")
                                 }
                                 Btn {
                                     visible: row.modelData.canManage

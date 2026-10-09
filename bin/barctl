@@ -38,27 +38,42 @@ state_set() { local cur='{}'; [[ -f $STATE ]] && cur=$(cat "$STATE"); jq --arg i
 state_del() { [[ -f $STATE ]] && jq --arg id "$1" 'del(.[$id])' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE" || true; }
 
 # ---- extra bars (extra-bars.json) -------------------------------------------
-extra_find() {  # extra_find <id> -> {"bar":"bottom","section":"right"} or empty
+extra_find() {  # extra_find <id> -> {"bar":"bottom","section":"right"[,"tray":"tray:t1"]} or empty
   [[ -f $EXTRA ]] || return 0
-  jq -c --arg id "$1" '[.bars[]? | .position as $p | ("left","center","right") as $s
-    | select(((.[$s] // []) | index($id)) != null) | {bar: $p, section: $s}] | first // empty' "$EXTRA"
+  jq -c --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
+    [.bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[]
+      | if eid == $id then {bar: $p, section: $s}
+        elif (type == "object" and ((.widgets // []) | index($id)) != null) then {bar: $p, section: $s, tray: .id}
+        else empty end] | first // empty' "$EXTRA"
 }
-extra_remove() {  # extra_remove <id>
+extra_remove() {  # extra_remove <id>: from every section and out of every tray; a bar this leaves empty goes away
   [[ -f $EXTRA ]] || return 0
   local tmp; tmp=$(mktemp)
-  jq --arg id "$1" '.bars |= map(
-      if ((.left // []) + (.center // []) + (.right // [])) | index($id) then
-        # a bar that this removal leaves empty goes away (empty bars you added on purpose stay)
-        (.left, .center, .right) |= (if . then map(select(. != $id)) else . end)
-        | if ((.left + .center + .right) | length) == 0 then empty else . end
-      else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+  jq --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
+    def count: ((.left // []) + (.center // []) + (.right // [])) | length;
+    .bars |= map(
+      count as $before
+      | (.left, .center, .right) |= (if . then map(select(eid != $id) | if type == "object" and .widgets then .widgets |= map(select(. != $id)) else . end) else . end)
+      | if $before > 0 and count == 0 then empty else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
 }
 extra_add() {  # extra_add <id> <position> <section>
   local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  jq --arg id "$1" --arg p "$2" --arg s "$3" '
+  jq --arg id "$1" --arg p "$2" --arg s "$3" 'def eid: if type == "object" then (.id // "") else . end;
       .bars = (.bars // [])
       | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
-      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(. != $id))) + [$id]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(eid != $id))) + [$id]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+}
+extra_add_obj() {  # extra_add_obj <json-entry> <position> <section>: add a tray (an object entry)
+  local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
+  jq --argjson e "$1" --arg p "$2" --arg s "$3" 'def eid: if type == "object" then (.id // "") else . end;
+      .bars = (.bars // [])
+      | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
+      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(eid != $e.id))) + [$e]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+}
+extra_entry() {  # extra_entry <id>: the stored entry (string or object) for an id, else empty
+  [[ -f $EXTRA ]] || return 0
+  jq -c --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
+    [.bars[]? | (.left, .center, .right)[]? | select(eid == $id)] | first // empty' "$EXTRA"
 }
 needs_service() {  # service+widget plugins must sit directly on a bar, never inside the tray
   omarchy-plugin-catalog | jq -e --arg id "$1" 'any(.[]; .id == $id and ((.kinds // []) | index("service")))' >/dev/null
@@ -192,35 +207,87 @@ cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
   case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
   case "$sect" in left|center|right) ;; *) echo "section must be left, center or right" >&2; exit 1 ;; esac
   # enabling puts a plugin on the main bar by default, so enable first, then take it off everywhere and add it where asked
-  omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-  layout_strip "$id"
+  if [[ $id == tray:* && $pos == "$(main_pos)" ]]; then echo "the main bar uses the Tray plugin; put trays on an extra bar" >&2; exit 1; fi
+  local entry=""; [[ $id == tray:* ]] && entry=$(extra_entry "$id")
+  [[ $id == tray:* ]] || omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+  [[ $id == tray:* ]] || layout_strip "$id"
   extra_remove "$id"
-  if [[ $pos == top ]]; then layout_add "$id" "$sect"; else extra_add "$id" "$pos" "$sect"; fi
+  if [[ $id == tray:* ]]; then
+    extra_add_obj "${entry:-{\"id\":\"$id\",\"widgets\":[]\}}" "$pos" "$sect"
+  elif [[ $pos == "$(main_pos)" ]]; then layout_add "$id" "$sect"
+  else extra_add "$id" "$pos" "$sect"; fi
   state_del "$id"
   echo "Moved $id to $pos bar ($sect)"
 }
 
+cmd_addtray() {  # cmd_addtray <edge> [section]: a new empty tray on an extra bar
+  local pos="$1" sect="${2:-right}" n=1 name
+  if [[ $pos == auto ]]; then   # the first extra bar, else the first edge that is not the main bar
+    pos=$([[ -f $EXTRA ]] && jq -r '.bars[0].position // empty' "$EXTRA")
+    if [[ -z $pos ]]; then for e in bottom top left right; do [[ $e != "$(main_pos)" ]] && { pos=$e; break; }; done; fi
+  fi
+  case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
+  [[ $pos != "$(main_pos)" ]] || { echo "the main bar uses the Tray plugin; put trays on an extra bar" >&2; exit 1; }
+  [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
+  while [[ -n $(extra_entry "tray:t$n") ]]; do n=$((n+1)); done
+  name="tray:t$n"
+  extra_add_obj "{\"id\":\"$name\",\"widgets\":[]}" "$pos" "$sect"
+  echo "Added $name to the $pos bar ($sect)"
+}
+
+cmd_rmtray() {  # cmd_rmtray <tray-id>: remove a tray; its widgets stay on the bar, in the tray's place
+  local id="$1" tmp; tmp=$(mktemp)
+  [[ -n $(extra_entry "$id") ]] || { echo "no such tray: $id" >&2; exit 1; }
+  jq --arg id "$id" 'def eid: if type == "object" then (.id // "") else . end;
+    .bars |= map((.left, .center, .right) |= (if . then map(if eid == $id then ((.widgets // [])[]) else . end) else . end))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+  echo "Removed $id (its widgets stay on the bar)"
+}
+
+cmd_intray() {  # cmd_intray <widget-id> <tray-id>: move a widget into a tray
+  local w="$1" t="$2" tmp; tmp=$(mktemp)
+  [[ -n $(extra_entry "$t") ]] || { echo "no such tray: $t" >&2; exit 1; }
+  [[ $w != tray:* ]] || { echo "a tray can't go inside a tray" >&2; exit 1; }
+  omarchy-shell shell setPluginEnabled "$w" true >/dev/null
+  layout_strip "$w"
+  extra_remove "$w"
+  jq --arg w "$w" --arg t "$t" 'def eid: if type == "object" then (.id // "") else . end;
+    .bars |= map((.left, .center, .right) |= (if . then map(if eid == $t then .widgets = (((.widgets // []) | map(select(. != $w))) + [$w]) else . end) else . end))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+  state_del "$w"
+  echo "Put $w in $t"
+}
+
 cmd_list() {
   local cat; cat=$(omarchy-plugin-catalog)
-  omarchy plugin list --json | jq --argjson cat "$cat" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
+  omarchy plugin list --json | jq --argjson cat "$cat" --arg main "$(main_pos)" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
+    def eid: if type == "object" then (.id // "") else . end;
     ($c[0].bar.layout // {}) as $l
-    | [ $l | to_entries[] | .key as $s | .value[] | {id, section: $s} ] as $top
-    | [ $l | to_entries[] | .value[] | .widgets? // [] | .[] | {id: .entry.id, section: "tray"} ] as $tray
-    | [ $x[0].bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[] | {id: ., section: ($p + "/" + $s), bar: $p} ] as $extra
+    | [ $l | to_entries[] | .key as $s | .value[] | {id, section: $s, bar: $main} ] as $top
+    | [ $l | to_entries[] | .value[] | .widgets? // [] | .[] | {id: .entry.id, section: "tray", bar: $main} ] as $tray
+    | [ $x[0].bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[]
+        | . as $e
+        | if type == "object"
+          then ({id: .id, section: ($p + "/" + $s), bar: $p, isTray: true, members: (.widgets // [])},
+                ((.widgets // [])[] | {id: ., section: ($p + "/" + $s), bar: $p, tray: $e.id}))
+          else {id: ., section: ($p + "/" + $s), bar: $p} end ] as $extra
     | ($top + $tray + $extra) as $onbar
     | ($cat | map({key: .id, value: .}) | from_entries) as $meta
-    | [ .[] | select(.kinds | index("bar-widget"))
+    | ([ .[] | select(.kinds | index("bar-widget"))
         | . as $x
-        | ($onbar | map(select(.id == $x.id)) | first) as $b
+        | ($onbar | map(select(.id == $x.id and (.isTray | not))) | first) as $b
         | ($meta[$x.id] // {}) as $m
         | { id, name, firstParty,
             enabled: (.enabled or ($b != null)),
-            onBar: ($b != null), section: ($b.section // ""), bar: ($b.bar // (if $b != null then "top" else "" end)),
+            onBar: ($b != null), section: ($b.section // ""), bar: ($b.bar // ""), tray: ($b.tray // ""),
             needsService: (($m.kinds // []) | index("service") != null),
             canManage: (.firstParty | not),
             description: ($m.description // ""),
             category: ($m.barWidget.category // ""),
             aliases: ($m.barWidget.aliases // []) } ]
+      + [ $extra[] | select(.isTray) | { id, name: ("Tray " + (.id | ltrimstr("tray:")) + " (" + ((.members | length) | tostring) + ")"),
+            firstParty: false, enabled: true, onBar: true, section, bar, tray: "", isTray: true, members,
+            needsService: false, canManage: false,
+            description: "A drawer on an extra bar; widgets you put in it slide out from its chevron",
+            category: "Tray", aliases: ["tray", "drawer", "chevron", "group"] } ])
     | sort_by(.name | ascii_downcase)'
 }
 
@@ -243,6 +310,9 @@ case "${1:-}" in
   hasedge) [[ $id == "$(main_pos)" ]] || extra_has "$id" ;;
   mainpos) cmd_mainpos "$id" ;;
   swapbars) cmd_swapbars "$id" "${3:-}" ;;
+  addtray) cmd_addtray "$id" "${3:-right}" ;;
+  rmtray) cmd_rmtray "$id" ;;
+  intray) cmd_intray "$id" "${3:-}" ;;
   place) cmd_place "$id" "${3:-}" "${4:-right}" ;;
   show) cmd_show "$id" ;;
   *) echo "usage: barctl list|place|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
