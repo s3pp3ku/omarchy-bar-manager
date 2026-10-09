@@ -56,19 +56,20 @@ extra_remove() {  # extra_remove <id>: from every section and out of every tray;
       | (.left, .center, .right) |= (if . then map(select(eid != $id) | if type == "object" and .widgets then .widgets |= map(select(. != $id)) else . end) else . end)
       | if $before > 0 and count == 0 then empty else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
 }
-extra_add() {  # extra_add <id> <position> <section>
-  local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  jq --arg id "$1" --arg p "$2" --arg s "$3" 'def eid: if type == "object" then (.id // "") else . end;
-      .bars = (.bars // [])
-      | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
-      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(eid != $id))) + [$id]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+extra_add() {  # extra_add <id> <position> <section> [before-id]
+  extra_add_obj "\"$1\"" "$2" "$3" "${4:-}"
 }
-extra_add_obj() {  # extra_add_obj <json-entry> <position> <section>: add a tray (an object entry)
+extra_add_obj() {  # extra_add_obj <json-entry> <position> <section> [before-id]: a string id or a tray object; inserted before another entry if given, else at the end
   local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  jq --argjson e "$1" --arg p "$2" --arg s "$3" 'def eid: if type == "object" then (.id // "") else . end;
-      .bars = (.bars // [])
+  jq --argjson e "$1" --arg p "$2" --arg s "$3" --arg before "${4:-}" 'def eid: if type == "object" then (.id // "") else . end;
+      ($e | eid) as $eid
+      | .bars = (.bars // [])
       | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
-      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(eid != $e.id))) + [$e]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+      | .bars |= map(if .position == $p then
+          .[$s] = (((.[$s] // []) | map(select(eid != $eid))) as $rest
+            | ($rest | map(eid) | index($before)) as $i
+            | if $before != "" and $i != null then ($rest[:$i] + [$e] + $rest[$i:]) else ($rest + [$e]) end)
+        else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
 }
 extra_entry() {  # extra_entry <id>: the stored entry (string or object) for an id, else empty
   [[ -f $EXTRA ]] || return 0
@@ -88,10 +89,12 @@ layout_strip() {  # layout_strip <id>: take it off the main bar and out of every
             else . end)))' --arg id "$1"
 }
 
-layout_add() {  # layout_add <id> <section>  (top bar)
+layout_add() {  # layout_add <id> <section> [before-id]  (main bar)
   apply '
     (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
-    | .bar.layout[$s] = (((.bar.layout[$s] // []) | map(select(.id != $id))) + [{id: $id}])' --arg id "$1" --arg s "$2"
+    | .bar.layout[$s] = (((.bar.layout[$s] // []) | map(select(.id != $id))) as $rest
+        | ($rest | map(.id) | index($before)) as $i
+        | if $before != "" and $i != null then ($rest[:$i] + [{id: $id}] + $rest[$i:]) else ($rest + [{id: $id}]) end)' --arg id "$1" --arg s "$2" --arg before "${3:-}"
 }
 
 on_bar() {  # on_bar <id> -> 0 if on bar (top-level or tray-hosted)
@@ -202,10 +205,13 @@ cmd_swapbars() {  # swap any two bars (main or extra) by their edges: barctl swa
   echo "Swapped the $a and $b bars"
 }
 
-cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
-  local id="$1" pos="${2:-}" sect="${3:-right}"
+cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section] [before-id]
+  local id="$1" pos="${2:-}" sect="${3:-right}" before="${4:-}"
+  [[ $before != "$id" ]] || before=""
   case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
-  case "$sect" in left|center|right) ;; *) echo "section must be left, center or right" >&2; exit 1 ;; esac
+  # side bars read top to bottom: top = start (left), middle = center, bottom = end (right)
+  case "$sect" in top) sect=left ;; middle) sect=center ;; bottom) sect=right ;; esac
+  case "$sect" in left|center|right) ;; *) echo "section must be left, center, right (or top, middle, bottom on a side bar)" >&2; exit 1 ;; esac
   # enabling puts a plugin on the main bar by default, so enable first, then take it off everywhere and add it where asked
   if [[ $id == tray:* && $pos == "$(main_pos)" ]]; then echo "the main bar uses the Tray plugin; put trays on an extra bar" >&2; exit 1; fi
   local entry=""; [[ $id == tray:* ]] && entry=$(extra_entry "$id")
@@ -213,9 +219,9 @@ cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
   [[ $id == tray:* ]] || layout_strip "$id"
   extra_remove "$id"
   if [[ $id == tray:* ]]; then
-    extra_add_obj "${entry:-{\"id\":\"$id\",\"widgets\":[]\}}" "$pos" "$sect"
-  elif [[ $pos == "$(main_pos)" ]]; then layout_add "$id" "$sect"
-  else extra_add "$id" "$pos" "$sect"; fi
+    extra_add_obj "${entry:-{\"id\":\"$id\",\"widgets\":[]\}}" "$pos" "$sect" "$before"
+  elif [[ $pos == "$(main_pos)" ]]; then layout_add "$id" "$sect" "$before"
+  else extra_add "$id" "$pos" "$sect" "$before"; fi
   state_del "$id"
   echo "Moved $id to $pos bar ($sect)"
 }
@@ -313,7 +319,8 @@ case "${1:-}" in
   addtray) cmd_addtray "$id" "${3:-right}" ;;
   rmtray) cmd_rmtray "$id" ;;
   intray) cmd_intray "$id" "${3:-}" ;;
-  place) cmd_place "$id" "${3:-}" "${4:-right}" ;;
+  place) cmd_place "$id" "${3:-}" "${4:-right}" "${5:-}" ;;
+  drop) cmd_place "$id" "${3:-}" "${4:-right}" "${5:-}" ;;
   show) cmd_show "$id" ;;
   *) echo "usage: barctl list|place|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
 esac

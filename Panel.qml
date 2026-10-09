@@ -316,7 +316,9 @@ Item {
                             Row {
                                 spacing: 2
                                 Repeater {
-                                    model: [{ k: "left", t: "‹" }, { k: "center", t: "·" }, { k: "right", t: "›" }]
+                                    model: (row.modelData.bar === "left" || row.modelData.bar === "right")
+                                       ? [{ k: "left", t: "↑" }, { k: "center", t: "·" }, { k: "right", t: "↓" }]
+                                       : [{ k: "left", t: "‹" }, { k: "center", t: "·" }, { k: "right", t: "›" }]
                                     Btn {
                                         required property var modelData
                                         label: modelData.t

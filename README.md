@@ -30,6 +30,7 @@ Omarchy's CLI can enable, disable and remove plugins, but has no "take it off th
 - **Every bar**: works with the main bar and with [Extra Bars](https://github.com/s3pp3ku/omarchy-extra-bars). Each row has pickers for the bar (T B L R) and the section (‹ · ›), for installed or not-yet-shown plugins alike. Removing an extra bar remembers its widgets, so adding it back restores them. Moving the main bar to an edge that already has a bar swaps the two, so nothing is lost.
 - **Service widgets placed correctly**: widgets that ship a background service (e.g. Keylight) are put directly on a bar, never inside the tray, where they would be invisible.
 - **Trays**: `+ Tray` adds a new empty tray (any number, on any extra bar). The `▢` button on each row puts a widget into a tray and cycles through them; trays move between bars and sections with the same pickers.
+- **Side bars**: a side bar's sections are top, middle and bottom (the panel shows ↑ · ↓ for them). Extra-bars supports dragging widgets between sections and bars.
 - **Scriptable**: everything the panel does is available from the terminal via `bin/barctl`.
 
 ## Requirements
@@ -74,6 +75,7 @@ bin/barctl swapbars <edge> <edge>              # swap any two bars (main or extr
 bin/barctl addtray <edge|auto> [section]        # new empty tray on an extra bar
 bin/barctl intray <plugin-id> <tray-id>        # put a widget in a tray (place takes it back out)
 bin/barctl rmtray <tray-id>                    # remove a tray; its widgets stay on the bar
+bin/barctl drop <plugin-id> <edge> <section> [before-id]   # what drag and drop uses; side bars accept top/middle/bottom
 bin/barctl fix                   # drop duplicate tray entries
 ```
 
