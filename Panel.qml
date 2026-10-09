@@ -294,6 +294,16 @@ Item {
                                 onClicked: root.act([row.modelData.onBar ? "hide" : "show", row.modelData.id], row.modelData.onBar ? "Hiding" : "Showing")
                             }
                             Btn {
+                                label: "Bar:" + (row.modelData.bar || "top")
+                                onClicked: {
+                                    var order = ["top", "bottom", "left", "right"]
+                                    var next = order[(order.indexOf(row.modelData.bar || "top") + 1) % order.length]
+                                    var sect = row.modelData.section.indexOf("/") >= 0 ? row.modelData.section.split("/")[1]
+                                             : (["left", "center", "right"].indexOf(row.modelData.section) >= 0 ? row.modelData.section : "right")
+                                    root.act(["place", row.modelData.id, next, sect], "Moving to " + next)
+                                }
+                            }
+                            Btn {
                                 label: row.modelData.enabled ? "Disable" : "Enable"
                                 onClicked: root.act([row.modelData.enabled ? "disable" : "enable", row.modelData.id], row.modelData.enabled ? "Disabling" : "Enabling")
                             }
@@ -319,7 +329,7 @@ Item {
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
                 Text {
                     Layout.fillWidth: true
-                    text: root.status !== "" ? root.status : "Esc closes.  [x] = shown on bar."
+                    text: root.status !== "" ? root.status : "Esc closes.  [x] = shown on bar.  Bar: click to move top→bottom→left→right."
                     elide: Text.ElideRight
                     color: root.status === "" ? root.dim : (root.statusOk ? root.accent : root.bad)
                     font.family: root.mono; font.pixelSize: 12

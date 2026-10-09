@@ -6,10 +6,13 @@
 #   barctl uninstall <id>       omarchy plugin remove
 #   barctl hide <id>            take off the bar, keep installed + enabled
 #   barctl show <id>            put back on the bar (same spot it was hidden from)
+#   barctl place <id> <top|bottom|left|right> [left|center|right]
+#                               move a widget to any bar (extra bars live in extra-bars.json)
 #   barctl fix                  drop duplicate tray entries
 set -euo pipefail
 
 CFG="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
+EXTRA="${OMARCHY_EXTRA_BARS_JSON:-$HOME/.config/omarchy/extra-bars.json}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-hidden.json"
 
 backup() { cp -f "$CFG" "$CFG.bak.barctl-$(date +%s)"; ls -t "$CFG".bak.barctl-* 2>/dev/null | tail -n +6 | xargs -r rm -f; }
@@ -34,8 +37,38 @@ state_get() { [[ -f $STATE ]] && jq -c --arg id "$1" '.[$id] // empty' "$STATE" 
 state_set() { local cur='{}'; [[ -f $STATE ]] && cur=$(cat "$STATE"); jq --arg id "$1" --argjson v "$2" '.[$id]=$v' <<<"$cur" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
 state_del() { [[ -f $STATE ]] && jq --arg id "$1" 'del(.[$id])' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE" || true; }
 
+# ---- extra bars (extra-bars.json) -------------------------------------------
+extra_find() {  # extra_find <id> -> {"bar":"bottom","section":"right"} or empty
+  [[ -f $EXTRA ]] || return 0
+  jq -c --arg id "$1" '[.bars[]? | .position as $p | ("left","center","right") as $s
+    | select(((.[$s] // []) | index($id)) != null) | {bar: $p, section: $s}] | first // empty' "$EXTRA"
+}
+extra_remove() {  # extra_remove <id>
+  [[ -f $EXTRA ]] || return 0
+  local tmp; tmp=$(mktemp)
+  jq --arg id "$1" '.bars |= map(
+      (.left, .center, .right) |= (if . then map(select(. != $id)) else . end))
+    | .bars |= map(select(((.left // []) + (.center // []) + (.right // [])) | length > 0))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+}
+extra_add() {  # extra_add <id> <position> <section>
+  local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
+  jq --arg id "$1" --arg p "$2" --arg s "$3" '
+      .bars = (.bars // [])
+      | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
+      | .bars |= map(if .position == $p then .[$s] = (((.[$s] // []) | map(select(. != $id))) + [$id]) else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
+}
+needs_service() {  # service+widget plugins must sit directly on a bar, never inside the tray
+  omarchy-plugin-catalog | jq -e --arg id "$1" 'any(.[]; .id == $id and ((.kinds // []) | index("service")))' >/dev/null
+}
+layout_add() {  # layout_add <id> <section>  (top bar)
+  apply '
+    (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
+    | .bar.layout[$s] = (((.bar.layout[$s] // []) | map(select(.id != $id))) + [{id: $id}])' --arg id "$1" --arg s "$2"
+}
+
 on_bar() {  # on_bar <id> -> 0 if on bar (top-level or tray-hosted)
-  jq -e --arg id "$1" '[.bar.layout[][] | ., (.widgets? // [] | .[] | .entry)] | any(.id == $id)' "$CFG" >/dev/null
+  jq -e --arg id "$1" '[.bar.layout[][] | ., (.widgets? // [] | .[] | .entry)] | any(.id == $id)' "$CFG" >/dev/null && return 0
+  [[ -n $(extra_find "$1") ]]
 }
 
 cmd_hide() {
@@ -45,8 +78,11 @@ cmd_hide() {
     | ([$l | to_entries[] | .key as $s | .value | to_entries[] | select(.value.id == $id) | {section: $s, index: .key}] | first) as $top
     | ([$l[][] | select(.widgets) | select(any(.widgets[]; .entry.id == $id)) | .id] | first) as $tray
     | if $tray then {tray: $tray} elif $top then $top else null end' "$CFG")
-  [[ $where != null ]] || { echo "$id is not on the bar"; return 0; }
+  if [[ $where == null ]]; then
+    where=$(extra_find "$id"); [[ -n $where ]] || { echo "$id is not on the bar"; return 0; }
+  fi
   state_set "$id" "$where"
+  extra_remove "$id"
   apply '
     .bar.layout |= with_entries(.value |= (
       map(select(.id != $id))
@@ -62,7 +98,14 @@ cmd_show() {
   if on_bar "$id"; then echo "$id is already on the bar"; return 0; fi
   where=$(state_get "$id")
   tray=$(jq -r '.tray // empty' <<<"${where:-{\}}")
-  if [[ -n $tray ]]; then
+  local xbar; xbar=$(jq -r '.bar // empty' <<<"${where:-{\}}")
+  if [[ -n $xbar ]]; then
+    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+    extra_add "$id" "$xbar" "$(jq -r '.section' <<<"$where")"
+  elif [[ -n $tray ]] && needs_service "$id"; then
+    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+    layout_add "$id" right
+  elif [[ -n $tray ]]; then
     apply '
       (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
       | .bar.layout |= with_entries(.value |= map(
@@ -71,19 +114,39 @@ cmd_show() {
   else
     local sect; sect=$(jq -r '.section // empty' <<<"${where:-{\}}")
     omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-    if [[ -n $sect ]]; then omarchy bar put "$id" --section "$sect"; else omarchy bar put "$id"; fi
+    layout_add "$id" "${sect:-right}"
   fi
   state_del "$id"
   echo "Added $id to bar"
 }
 
+cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
+  local id="$1" pos="${2:-}" sect="${3:-right}"
+  case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
+  case "$sect" in left|center|right) ;; *) echo "section must be left, center or right" >&2; exit 1 ;; esac
+  # take it off wherever it is now (no hidden-state record: this is an explicit move)
+  apply '
+    .bar.layout |= with_entries(.value |= (
+      map(select(.id != $id))
+      | map(if .widgets then
+              .widgets |= map(select(.entry.id != $id))
+              | (if .order then .order |= map(select(. != $id)) else . end)
+            else . end)))' --arg id "$id"
+  extra_remove "$id"
+  omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+  if [[ $pos == top ]]; then layout_add "$id" "$sect"; else extra_add "$id" "$pos" "$sect"; fi
+  state_del "$id"
+  echo "Moved $id to $pos bar ($sect)"
+}
+
 cmd_list() {
   local cat; cat=$(omarchy-plugin-catalog)
-  omarchy plugin list --json | jq --argjson cat "$cat" --slurpfile c "$CFG" --slurpfile h <([[ -f $STATE ]] && cat "$STATE" || echo '{}') '
+  omarchy plugin list --json | jq --argjson cat "$cat" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
     ($c[0].bar.layout // {}) as $l
     | [ $l | to_entries[] | .key as $s | .value[] | {id, section: $s} ] as $top
     | [ $l | to_entries[] | .value[] | .widgets? // [] | .[] | {id: .entry.id, section: "tray"} ] as $tray
-    | ($top + $tray) as $onbar
+    | [ $x[0].bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[] | {id: ., section: ($p + "/" + $s), bar: $p} ] as $extra
+    | ($top + $tray + $extra) as $onbar
     | ($cat | map({key: .id, value: .}) | from_entries) as $meta
     | [ .[] | select(.kinds | index("bar-widget"))
         | . as $x
@@ -91,7 +154,8 @@ cmd_list() {
         | ($meta[$x.id] // {}) as $m
         | { id, name, firstParty,
             enabled: (.enabled or ($b != null)),
-            onBar: ($b != null), section: ($b.section // ""),
+            onBar: ($b != null), section: ($b.section // ""), bar: ($b.bar // (if $b != null then "top" else "" end)),
+            needsService: (($m.kinds // []) | index("service") != null),
             canManage: (.firstParty | not),
             description: ($m.description // ""),
             category: ($m.barWidget.category // ""),
@@ -113,6 +177,7 @@ case "${1:-}" in
   update) if [[ $id == --all ]]; then omarchy plugin update --yes; else omarchy plugin update "$id" --yes; fi ;;
   uninstall) cmd_hide "$id" >/dev/null || true; state_del "$id"; omarchy plugin remove "$id" --yes ;;
   hide) cmd_hide "$id" ;;
+  place) cmd_place "$id" "${3:-}" "${4:-right}" ;;
   show) cmd_show "$id" ;;
-  *) echo "usage: barctl list|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
+  *) echo "usage: barctl list|place|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
 esac

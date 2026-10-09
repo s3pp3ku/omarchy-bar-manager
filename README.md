@@ -27,6 +27,8 @@ Omarchy's CLI can enable, disable and remove plugins, but has no "take it off th
 - **Duplicate cleanup**: removes repeated tray entries that cause doubled icons, automatically on every change (or `barctl fix`).
 - **Safe edits**: before every change to `shell.json` a backup is saved as `shell.json.bak.barctl-<timestamp>` (last five are kept).
 - **Theme-aware**: simple flat, monospace look that follows your current Omarchy theme colors.
+- **Every bar**: works with the main bar and with [Extra Bars](https://github.com/s3pp3ku/omarchy-extra-bars). Each row has a `Bar:` button that moves a widget between the top, bottom, left and right bars. Empty extra bars are removed automatically.
+- **Service widgets placed correctly**: widgets that ship a background service (e.g. Keylight) are put directly on a bar, never inside the tray, where they would be invisible.
 - **Scriptable**: everything the panel does is available from the terminal via `bin/barctl`.
 
 ## Requirements
@@ -64,6 +66,7 @@ bin/barctl enable <plugin-id>
 bin/barctl disable <plugin-id>   # also takes it off the bar
 bin/barctl update <plugin-id>    # or: update --all
 bin/barctl uninstall <plugin-id>
+bin/barctl place <plugin-id> <top|bottom|left|right> [left|center|right]
 bin/barctl fix                   # drop duplicate tray entries
 ```
 
