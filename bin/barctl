@@ -63,6 +63,16 @@ extra_add() {  # extra_add <id> <position> <section>
 needs_service() {  # service+widget plugins must sit directly on a bar, never inside the tray
   omarchy-plugin-catalog | jq -e --arg id "$1" 'any(.[]; .id == $id and ((.kinds // []) | index("service")))' >/dev/null
 }
+layout_strip() {  # layout_strip <id>: take it off the main bar and out of every tray (enabling a plugin puts it there by default)
+  apply '
+    .bar.layout |= with_entries(.value |= (
+      map(select(.id != $id))
+      | map(if .widgets then
+              .widgets |= map(select(.entry.id != $id))
+              | (if .order then .order |= map(select(. != $id)) else . end)
+            else . end)))' --arg id "$1"
+}
+
 layout_add() {  # layout_add <id> <section>  (top bar)
   apply '
     (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
@@ -104,6 +114,7 @@ cmd_show() {
   local xbar; xbar=$(jq -r '.bar // empty' <<<"${where:-{\}}")
   if [[ -n $xbar ]]; then
     omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+    layout_strip "$id"
     extra_add "$id" "$xbar" "$(jq -r '.section' <<<"$where")"
   elif [[ -n $tray ]] && needs_service "$id"; then
     omarchy-shell shell setPluginEnabled "$id" true >/dev/null
@@ -152,16 +163,10 @@ cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section]
   local id="$1" pos="${2:-}" sect="${3:-right}"
   case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
   case "$sect" in left|center|right) ;; *) echo "section must be left, center or right" >&2; exit 1 ;; esac
-  # take it off wherever it is now (no hidden-state record: this is an explicit move)
-  apply '
-    .bar.layout |= with_entries(.value |= (
-      map(select(.id != $id))
-      | map(if .widgets then
-              .widgets |= map(select(.entry.id != $id))
-              | (if .order then .order |= map(select(. != $id)) else . end)
-            else . end)))' --arg id "$id"
-  extra_remove "$id"
+  # enabling puts a plugin on the main bar by default, so enable first, then take it off everywhere and add it where asked
   omarchy-shell shell setPluginEnabled "$id" true >/dev/null
+  layout_strip "$id"
+  extra_remove "$id"
   if [[ $pos == top ]]; then layout_add "$id" "$sect"; else extra_add "$id" "$pos" "$sect"; fi
   state_del "$id"
   echo "Moved $id to $pos bar ($sect)"
