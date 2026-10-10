@@ -239,7 +239,7 @@ Item {
                     spacing: 6
                     Text { text: "BAR"; Layout.preferredWidth: 28; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "PLUGIN"; Layout.fillWidth: true; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 280; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
+                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 250; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
@@ -304,11 +304,15 @@ Item {
                                     Btn {
                                         required property var modelData
                                         label: modelData.t
-                                        picked: row.modelData.onBar && (row.modelData.bar || "top") === modelData.k
-                                        tip: "Show on the " + modelData.k + " bar"
+                                        // a widget can be on several bars at once: each letter adds or removes that bar
+                                        picked: row.modelData.isTray ? (row.modelData.bar === modelData.k)
+                                                                     : (row.modelData.bars || []).indexOf(modelData.k) !== -1
+                                        tip: "Toggle the " + modelData.k + " bar"
                                         onClicked: {
-                                            if (picked && row.modelData.section === "tray") return
-                                            root.act(["place", row.modelData.id, modelData.k, row.curSection()], "Moving to " + modelData.k)
+                                            if (row.modelData.isTray)
+                                                root.act(["place", row.modelData.id, modelData.k, row.curSection()], "Moving to " + modelData.k)
+                                            else
+                                                root.act(["toggle", row.modelData.id, modelData.k, row.curSection()], (picked ? "Removing from " : "Adding to ") + modelData.k)
                                         }
                                     }
                                 }
@@ -323,7 +327,9 @@ Item {
                                         required property var modelData
                                         label: modelData.t
                                         picked: row.modelData.onBar && row.curSection() === modelData.k && row.modelData.section !== "tray"
-                                        onClicked: root.act(["place", row.modelData.id, row.modelData.onBar ? (row.modelData.bar || "top") : "top", modelData.k], "Moving")
+                                        onClicked: root.act(row.modelData.isTray
+                                            ? ["place", row.modelData.id, row.modelData.bar, modelData.k]
+                                            : ["setsection", row.modelData.id, modelData.k], "Moving")
                                     }
                                 }
                             }
@@ -383,7 +389,7 @@ Item {
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
                 Text {
                     Layout.fillWidth: true
-                    text: root.status !== "" ? root.status : "Esc closes.  [x] = shown on bar.  Pick a bar (T B L R) and a section (‹ · ›) for any plugin."
+                    text: root.status !== "" ? root.status : "Esc closes.  T B L R: click each bar you want it on (several at once).  ‹ · ›: section."
                     elide: Text.ElideRight
                     color: root.status === "" ? root.dim : (root.statusOk ? root.accent : root.bad)
                     font.family: root.mono; font.pixelSize: 12

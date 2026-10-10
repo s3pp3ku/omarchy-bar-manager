@@ -27,7 +27,7 @@ Omarchy's CLI can enable, disable and remove plugins, but has no "take it off th
 - **Duplicate cleanup**: removes repeated tray entries that cause doubled icons, automatically on every change (or `barctl fix`).
 - **Safe edits**: before every change to `shell.json` a backup is saved as `shell.json.bak.barctl-<timestamp>` (last five are kept).
 - **Theme-aware**: simple flat, monospace look that follows your current Omarchy theme colors.
-- **Every bar**: works with the main bar and with [Extra Bars](https://github.com/s3pp3ku/omarchy-extra-bars). Each row has pickers for the bar (T B L R) and the section (‹ · ›), for installed or not-yet-shown plugins alike. Removing an extra bar remembers its widgets, so adding it back restores them. Moving the main bar to an edge that already has a bar swaps the two, so nothing is lost.
+- **Every bar**: works with the main bar and with [Extra Bars](https://github.com/s3pp3ku/omarchy-extra-bars). Each row has pickers for the bars (T B L R) and the section (‹ · ›), for installed or not-yet-shown plugins alike. The bar letters are toggles: click each bar you want, so one plugin can sit on several bars at once. For the Tray plugin the main bar gets the real Tray and every other bar gets one of its own built-in trays. Removing an extra bar remembers its widgets, so adding it back restores them. Moving the main bar to an edge that already has a bar swaps the two, so nothing is lost.
 - **Service widgets placed correctly**: widgets that ship a background service (e.g. Keylight) are put directly on a bar, never inside the tray, where they would be invisible.
 - **Trays**: `+ Tray` adds a new empty tray (any number, on any extra bar). The `▢` button on each row puts a widget into a tray and cycles through them; trays move between bars and sections with the same pickers.
 - **Side bars**: a side bar's sections are top, middle and bottom (the panel shows ↑ · ↓ for them). Extra-bars supports dragging widgets between sections and bars.
@@ -76,6 +76,8 @@ bin/barctl addtray <edge|auto> [section]        # new empty tray on an extra bar
 bin/barctl intray <plugin-id> <tray-id>        # put a widget in a tray (place takes it back out)
 bin/barctl rmtray <tray-id>                    # remove a tray; its widgets stay on the bar
 bin/barctl drop <plugin-id> <edge> <section> [before-id]   # what drag and drop uses; side bars accept top/middle/bottom
+bin/barctl toggle <plugin-id> <edge> [section]   # add it to / remove it from one bar, others untouched
+bin/barctl setsection <plugin-id> <section>    # same section on every bar it is on
 bin/barctl fix                   # drop duplicate tray entries
 ```
 
@@ -93,3 +95,7 @@ Use `OMARCHY_SHELL_JSON=/path/to/copy.json` to try changes against a copy of you
 ## License
 
 MIT
+
+## Settings are remembered
+
+Taking a plugin off the main bar remembers its entry (the Tray's widget list, a clock's format and so on) in `~/.local/state/barctl-removed-main-entries.json`, and putting it back restores it.
