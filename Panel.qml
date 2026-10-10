@@ -112,22 +112,24 @@ Item {
                              rect: { x: zp.x + s.x, y: zp.y + s.y, w: s.w, h: s.h } }
             }
         }
-        var before = "", mark = null
+        var before = "", mark = null, num = slots.length + 1
         for (var j = 0; j < slots.length; j++) {
             var c = slots[j]
             if (ly < c.y || (ly <= c.y + c.h && lx < c.x + c.w / 2)) {
-                before = c.id; mark = { x: zp.x + c.x - 3, y: zp.y + c.y, w: 3, h: c.h }; break
+                before = c.id; num = j + 1; mark = { x: zp.x + c.x - 2, y: zp.y + c.y, w: 4, h: c.h }; break
             }
         }
-        if (!mark) {
-            if (slots.length) { var l = slots[slots.length - 1]; mark = { x: zp.x + l.x + l.w + 1, y: zp.y + l.y, w: 3, h: l.h } }
-            else mark = { x: zp.x + 8, y: zp.y + 18, w: 3, h: 22 }
+        if (!mark) {   // append: highlight the spare cell at the end
+            var sp = z.spareRect()
+            mark = sp ? { x: zp.x + sp.x, y: zp.y + sp.y, w: sp.w, h: sp.h } : { x: zp.x + 8, y: zp.y + 18, w: 30, h: 30 }
         }
-        return { edge: z.edge, section: z.section, before: before, intray: "", rect: mark }
+        return { edge: z.edge, section: z.section, before: before, intray: "", num: num, rect: mark, cellKey: "" }
     }
 
     function open(payloadJson) {
         probed = false
+        // `omarchy-shell shell summon s3pp3ku.bar-manager '{"view":"layout"}'` opens straight into the Layout screen
+        try { var pl = JSON.parse(payloadJson || "{}"); if (pl.view === "layout" || pl.view === "list") root.view = pl.view } catch (e) {}
         closingFromHost = false
         window.visible = true
         refresh()
@@ -406,9 +408,21 @@ Item {
                             y: root.dropTarget ? root.dropTarget.rect.y : 0
                             width: root.dropTarget ? root.dropTarget.rect.w : 0
                             height: root.dropTarget ? root.dropTarget.rect.h : 0
-                            readonly property bool box: root.dropTarget ? root.dropTarget.intray !== "" : false
+                            readonly property bool box: root.dropTarget ? (root.dropTarget.intray !== "" || root.dropTarget.rect.w > 10) : false
                             color: box ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : root.accent
                             border.color: root.accent; border.width: box ? 2 : 0
+                        }
+                        Rectangle {   // "it will become number N"
+                            z: 55
+                            visible: root.dropTarget !== null && root.dropTarget.num !== undefined
+                            readonly property real mx: root.dropTarget ? root.dropTarget.rect.x : 0
+                            readonly property real my: root.dropTarget ? root.dropTarget.rect.y : 0
+                            x: Math.max(0, Math.min(canvas.width - width, mx + (root.dropTarget && root.dropTarget.rect.w > 10 ? 2 : -width / 2)))
+                            y: Math.max(0, my - height + 2)
+                            width: 22; height: 16; radius: 8
+                            color: root.accent
+                            Text { anchors.centerIn: parent; text: root.dropTarget && root.dropTarget.num !== undefined ? "#" + root.dropTarget.num : ""
+                                   color: root.bg; font.family: root.mono; font.pixelSize: 10; font.bold: true }
                         }
                         Rectangle {   // the chip being dragged
                             z: 60
@@ -677,6 +691,36 @@ Item {
         }
     }
 
+    // One numbered grid cell: a widget sits in it, or it is the spare cell at the end of a section.
+    component Cell: Rectangle {
+        id: cell
+        property var entry: ({})
+        property int num: 1
+        readonly property bool spare: !!entry.spare
+        readonly property bool dragged: !spare && root.dragInfo !== null && root.dragInfo.id === entry.id
+        readonly property bool target: root.dropTarget !== null && root.dropTarget.cellKey === cellKey
+        property string cellKey: ""
+        implicitWidth: spare ? 34 : (chipHolder.item ? chipHolder.item.implicitWidth : 28) + 8
+        implicitHeight: spare ? 34 : (chipHolder.item ? chipHolder.item.implicitHeight : 24) + 11
+        color: spare ? "transparent" : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.03)
+        border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, spare ? 0.28 : 0.5)
+        border.width: 1
+        radius: 2
+        Text {
+            x: 3; y: 1
+            text: String(cell.num)
+            color: root.accent
+            opacity: 0.85
+            font.family: root.mono; font.pixelSize: 8; font.bold: true
+        }
+        Loader {
+            id: chipHolder
+            active: !cell.spare
+            x: 4; y: 10
+            sourceComponent: Component { Chip { entry: cell.entry } }
+        }
+    }
+
     component Zone: Rectangle {
         id: zone
         property string edge: ""
@@ -694,18 +738,29 @@ Item {
             x: 4; y: 14
             width: zone.width - 8
             spacing: 3
-            Repeater { id: zrep; model: zone.entries; delegate: Chip { required property var modelData; entry: modelData } }
+            Repeater {
+                id: zrep
+                model: (zone.entries || []).concat([{ spare: true, id: "" }])
+                delegate: Cell { required property var modelData; required property int index; entry: modelData; num: index + 1 }
+            }
         }
-        // where each chip sits, in this zone's coordinates (the dragged one left out)
+        // where each cell with a widget sits, in this zone's coordinates (the dragged one left out)
         function slotInfo(excludeId) {
             var out = []
             for (var i = 0; i < zrep.count; i++) {
                 var it = zrep.itemAt(i)
-                if (!it || it.entry.id === excludeId) continue
+                if (!it || it.spare || it.entry.id === excludeId) continue
                 var p = it.mapToItem(zone, 0, 0)
-                out.push({ id: it.entry.id, x: p.x, y: p.y, w: it.width, h: it.height, isTray: it.isTray })
+                out.push({ id: it.entry.id, x: p.x, y: p.y, w: it.width, h: it.height, isTray: !!it.entry.tray })
             }
             return out
+        }
+        // the spare cell at the end: where "append" lands
+        function spareRect() {
+            var it = zrep.itemAt(zrep.count - 1)
+            if (!it) return null
+            var p = it.mapToItem(zone, 0, 0)
+            return { x: p.x, y: p.y, w: it.width, h: it.height }
         }
         Component.onCompleted: root.registerZone(zone)
     }
