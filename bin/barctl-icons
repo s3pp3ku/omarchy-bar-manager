@@ -19,7 +19,7 @@ def glyph_in(text):
         return g
     return best
 
-def main():
+def static_icons():
     cat = json.loads(subprocess.run(["omarchy-plugin-catalog"], capture_output=True, text=True).stdout or "[]")
     files = {}
     for p in cat:
@@ -29,7 +29,7 @@ def main():
              for i, (w, d) in files.items() if os.path.exists(w)}
     try:
         old = json.load(open(CACHE))
-        if old.get("stamp") == stamp: print(json.dumps(old["icons"], ensure_ascii=False)); return
+        if old.get("stamp") == stamp: return old["icons"]
     except Exception: pass
     icons = {}
     for i, (w, d) in files.items():
@@ -56,5 +56,29 @@ def main():
         icons.setdefault(i, g)
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     json.dump({"stamp": stamp, "icons": icons}, open(CACHE, "w"), ensure_ascii=False)
+    return icons
+
+def main():
+    icons = static_icons()
+    # icons the widgets reported when Extra Bars loaded them (what they really draw right now) win
+    try:
+        live = json.load(open(os.path.expanduser("~/.cache/barctl-icons-live.json")))
+    except Exception:
+        live = {}
+    KEEP_STATIC = {"s3pp3ku.omavoid"}   # chosen on purpose: the game controller reads better than the sprite
+    for i, v in live.items():
+        if i in KEEP_STATIC: continue
+        if v.startswith("img:"):
+            path = v[4:]
+            try:   # a picture only if it is icon-sized and not blank (hidden widgets photograph as nothing)
+                import struct
+                w, h = struct.unpack(">II", open(path, "rb").read(32)[16:24])
+                if w > 64 or h > 64: continue
+                mean = float(subprocess.run(["magick", path, "-alpha", "extract", "-format", "%[fx:mean]", "info:"],
+                                            capture_output=True, text=True).stdout or 0)
+                if mean < 0.01: continue
+            except Exception:
+                continue
+        icons[i] = v
     print(json.dumps(icons, ensure_ascii=False))
 main()

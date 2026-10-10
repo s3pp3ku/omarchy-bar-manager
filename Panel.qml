@@ -38,9 +38,33 @@ Item {
         stdout: StdioCollector {
             id: layoutOut
             waitForEnd: true
-            onStreamFinished: { try { root.layoutData = JSON.parse(layoutOut.text) } catch (e) {} }
+            onStreamFinished: {
+                try { root.layoutData = JSON.parse(layoutOut.text) } catch (e) { return }
+                if (!root.probed && root.view === "layout") root.probeIcons()
+            }
         }
     }
+    // Ask Extra Bars to load the widgets on the bars for a moment and report the icons they really draw,
+    // then redraw the Layout screen with them.
+    property bool probed: false
+    function probeIcons() {
+        var ids = {}
+        var bars = root.layoutData.bars || {}
+        for (var e in bars) {
+            var secs = bars[e].sections || {}
+            for (var s in secs) for (var i = 0; i < secs[s].length; i++) {
+                var en = secs[s][i]
+                if (!en.tray) ids[en.id] = true
+                for (var m = 0; m < (en.members || []).length; m++) ids[en.members[m].id] = true
+            }
+        }
+        var list = Object.keys(ids)
+        if (!list.length) return
+        probed = true
+        Quickshell.execDetached(["omarchy-shell", "s3pp3ku.extra-bars.icons", "probe", list.join(",")])
+        probeRefresh.restart()
+    }
+    Timer { id: probeRefresh; interval: 3600; onTriggered: root.refreshLayout() }
     function registerZone(z) { zoneItems = zoneItems.concat([z]) }
 
     // chips show the widget's own icon; widgets we could not read one from get letters
@@ -103,6 +127,7 @@ Item {
     }
 
     function open(payloadJson) {
+        probed = false
         closingFromHost = false
         window.visible = true
         refresh()
@@ -579,7 +604,17 @@ Item {
         color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
         border.color: root.dim; border.width: 1
         opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
+        readonly property bool iconIsImage: String(entry.icon || "").indexOf("img:") === 0
+        Image {
+            visible: mchip.iconIsImage
+            anchors.centerIn: parent
+            width: 17; height: 17
+            fillMode: Image.PreserveAspectFit
+            cache: false
+            source: mchip.iconIsImage ? "file://" + String(mchip.entry.icon).substring(4) : ""
+        }
         Text {
+            visible: !mchip.iconIsImage
             anchors.centerIn: parent
             text: mchip.entry.icon ? mchip.entry.icon : root.monogram(mchip.entry.name)
             color: root.fg
@@ -605,8 +640,17 @@ Item {
         implicitWidth: isTray ? Math.min(230, Math.max(70, members.length * 25 + 10)) : 28
         implicitHeight: isTray ? 22 + (members.length ? memberFlow.implicitHeight + 5 : 2) : 24
         opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
+        readonly property bool iconIsImage: String(entry.icon || "").indexOf("img:") === 0
+        Image {
+            visible: !chip.isTray && chip.iconIsImage
+            anchors.centerIn: parent
+            width: 21; height: 21
+            fillMode: Image.PreserveAspectFit
+            cache: false
+            source: chip.iconIsImage ? "file://" + String(chip.entry.icon).substring(4) : ""
+        }
         Text {
-            visible: !chip.isTray
+            visible: !chip.isTray && !chip.iconIsImage
             anchors.centerIn: parent
             text: chip.entry.icon ? chip.entry.icon : root.monogram(chip.entry.name)
             color: root.fg
