@@ -21,10 +21,81 @@ Item {
     property string confirmId: ""     // id awaiting uninstall confirmation
     property bool busy: runner.running
 
+    // ------------------------------------------------------------ layout screen
+    property string view: "list"
+    property var layoutData: ({ main: "top", bars: ({}) })
+    property var dragInfo: null          // { id, name, isTray, mainTray }
+    property var dropTarget: null        // { edge, section, before, intray, rect } in canvas coordinates
+    property real dragX: 0
+    property real dragY: 0
+    property Item canvasItem: null
+    property var zoneItems: []
+
+    function refreshLayout() { layoutProc.running = false; layoutProc.running = true }
+    Process {
+        id: layoutProc
+        command: [root.barctl, "layout"]
+        stdout: StdioCollector {
+            id: layoutOut
+            waitForEnd: true
+            onStreamFinished: { try { root.layoutData = JSON.parse(layoutOut.text) } catch (e) {} }
+        }
+    }
+    function registerZone(z) { zoneItems = zoneItems.concat([z]) }
+
+    function beginLayoutDrag(info) { dragInfo = info; dropTarget = null }
+    function moveLayoutDrag(pt) { dragX = pt.x; dragY = pt.y; dropTarget = targetAt(pt.x, pt.y) }
+    function endLayoutDrag() {
+        var t = dropTarget, d = dragInfo
+        dragInfo = null
+        dropTarget = null
+        if (!t || !d) return
+        if (t.intray) act(["intray", d.id, t.intray], "Putting " + d.name + " in the tray")
+        else act(["drop", d.id, t.edge, t.section, t.before], "Moving " + d.name)
+    }
+    function targetAt(px, py) {
+        for (var i = 0; i < zoneItems.length; i++) {
+            var z = zoneItems[i]
+            if (!z.visible) continue
+            var p = z.mapToItem(canvasItem, 0, 0)
+            if (px >= p.x && px <= p.x + z.width && py >= p.y && py <= p.y + z.height)
+                return zoneTarget(z, px - p.x, py - p.y, p)
+        }
+        return null
+    }
+    function zoneTarget(z, lx, ly, zp) {
+        var d = dragInfo
+        var isMain = z.edge === layoutData.main
+        if (d.isTray && isMain) return null            // built-in trays live on the extra bars
+        if (d.mainTray && !isMain) return null         // the real Tray plugin stays on the main bar
+        var slots = z.slotInfo(d.id)
+        if (!d.isTray && !d.mainTray) {
+            for (var t = 0; t < slots.length; t++) {   // over a tray: the widget goes inside it
+                var s = slots[t]
+                if (s.isTray && lx >= s.x && lx <= s.x + s.w && ly >= s.y && ly <= s.y + s.h)
+                    return { edge: z.edge, section: z.section, before: "", intray: s.id,
+                             rect: { x: zp.x + s.x, y: zp.y + s.y, w: s.w, h: s.h } }
+            }
+        }
+        var before = "", mark = null
+        for (var j = 0; j < slots.length; j++) {
+            var c = slots[j]
+            if (ly < c.y || (ly <= c.y + c.h && lx < c.x + c.w / 2)) {
+                before = c.id; mark = { x: zp.x + c.x - 3, y: zp.y + c.y, w: 3, h: c.h }; break
+            }
+        }
+        if (!mark) {
+            if (slots.length) { var l = slots[slots.length - 1]; mark = { x: zp.x + l.x + l.w + 1, y: zp.y + l.y, w: 3, h: l.h } }
+            else mark = { x: zp.x + 8, y: zp.y + 18, w: 3, h: 22 }
+        }
+        return { edge: z.edge, section: z.section, before: before, intray: "", rect: mark }
+    }
+
     function open(payloadJson) {
         closingFromHost = false
         window.visible = true
         refresh()
+        refreshLayout()
         Qt.callLater(function () { if (window.visible) keyCatcher.forceActiveFocus() })
     }
     function close() { closingFromHost = true; window.visible = false; closingFromHost = false }
@@ -66,6 +137,7 @@ Item {
             var msg = (code === 0 ? rOut.text : (rErr.text || rOut.text)).trim().split("\n")
             root.status = msg[msg.length - 1] || (code === 0 ? "Done" : "Failed")
             root.refresh()
+            root.refreshLayout()
         }
     }
 
@@ -208,6 +280,8 @@ Item {
                         color: root.dim; font.family: root.mono; font.pixelSize: 12
                     }
                     Item { Layout.fillWidth: true }
+                    Btn { label: root.view === "list" ? "Layout" : "List"; picked: root.view === "layout"
+                          onClicked: { root.view = root.view === "list" ? "layout" : "list"; if (root.view === "layout") root.refreshLayout() } }
                     Btn { label: "+ Tray"; onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
                     Btn { label: "Update all"; onClicked: root.act(["update", "--all"], "Updating all") }
                     Btn { label: "Refresh"; onClicked: root.refresh() }
@@ -215,6 +289,7 @@ Item {
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.accent }
 
                 RowLayout {
+                    visible: root.view === "list"
                     Layout.fillWidth: true
                     spacing: 6
                     Text { text: "Search:"; color: root.dim; font.family: root.mono; font.pixelSize: 13 }
@@ -234,6 +309,7 @@ Item {
 
                 // Column headers
                 RowLayout {
+                    visible: root.view === "list"
                     Layout.fillWidth: true
                     Layout.leftMargin: 6; Layout.rightMargin: 6
                     spacing: 6
@@ -242,9 +318,65 @@ Item {
                     Text { text: "BAR / SECTION"; Layout.preferredWidth: 250; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                     Text { text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
                 }
-                Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
+                Rectangle { visible: root.view === "list"; Layout.fillWidth: true; height: 1; color: root.dim }
+
+                // ---- Layout screen: every bar drawn as it sits on the screen; drag chips between slots
+                Item {
+                    visible: root.view === "layout"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Item {
+                        id: canvas
+                        anchors.fill: parent
+                        Component.onCompleted: root.canvasItem = canvas
+                        readonly property real hThick: 124
+                        readonly property real sideW: 180
+                        readonly property var bars: root.layoutData.bars || ({})
+                        function has(e) { return !!(bars[e] && bars[e].exists) }
+                        function dataOf(e) { return bars[e] || ({ exists: false, main: false, sections: ({}) }) }
+                        readonly property real topH: has("top") ? Math.min(230, Math.max(70, topBox.needH)) : 34
+                        readonly property real botH: has("bottom") ? Math.min(180, Math.max(70, bottomBox.needH)) : 34
+                        readonly property real leftW: has("left") ? sideW : 44
+                        readonly property real rightW: has("right") ? sideW : 44
+
+                        // top and bottom span the full width; the side bars run between them (as on the real screen)
+                        BarBox { id: topBox; edge: "top"; barData: canvas.dataOf("top"); x: 0; y: 0; width: canvas.width; height: canvas.topH }
+                        BarBox { id: bottomBox; edge: "bottom"; barData: canvas.dataOf("bottom"); x: 0; y: canvas.height - canvas.botH; width: canvas.width; height: canvas.botH }
+                        BarBox { edge: "left"; barData: canvas.dataOf("left"); x: 0; y: canvas.topH; width: canvas.leftW; height: canvas.height - canvas.topH - canvas.botH }
+                        BarBox { edge: "right"; barData: canvas.dataOf("right"); x: canvas.width - canvas.rightW; y: canvas.topH; width: canvas.rightW; height: canvas.height - canvas.topH - canvas.botH }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "your screen\ndrag a widget to a slot  ·  drop it on a tray to put it inside"
+                            horizontalAlignment: Text.AlignHCenter
+                            color: root.dim; font.family: root.mono; font.pixelSize: 12
+                        }
+
+                        Rectangle {   // drop marker
+                            z: 50
+                            visible: root.dropTarget !== null
+                            x: root.dropTarget ? root.dropTarget.rect.x : 0
+                            y: root.dropTarget ? root.dropTarget.rect.y : 0
+                            width: root.dropTarget ? root.dropTarget.rect.w : 0
+                            height: root.dropTarget ? root.dropTarget.rect.h : 0
+                            readonly property bool box: root.dropTarget ? root.dropTarget.intray !== "" : false
+                            color: box ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : root.accent
+                            border.color: root.accent; border.width: box ? 2 : 0
+                        }
+                        Rectangle {   // the chip being dragged
+                            z: 60
+                            visible: root.dragInfo !== null
+                            x: root.dragX + 12; y: root.dragY + 12
+                            width: ghostText.implicitWidth + 14; height: 22
+                            color: root.bg; border.color: root.accent; border.width: 1; radius: 3
+                            Text { id: ghostText; anchors.centerIn: parent; text: root.dragInfo ? root.dragInfo.name : ""
+                                   color: root.fg; font.family: root.mono; font.pixelSize: 11 }
+                        }
+                    }
+                }
 
                 ListView {
+                    visible: root.view === "list"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
@@ -389,12 +521,146 @@ Item {
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.dim }
                 Text {
                     Layout.fillWidth: true
-                    text: root.status !== "" ? root.status : "Esc closes.  T B L R: click each bar you want it on (several at once).  ‹ · ›: section."
+                    text: root.status !== "" ? root.status : (root.view === "layout" ? "Esc closes.  Drag a chip to a slot; drop it on a tray to put it inside." : "Esc closes.  T B L R: click each bar you want it on (several at once).  ‹ · ›: section.")
                     elide: Text.ElideRight
                     color: root.status === "" ? root.dim : (root.statusOk ? root.accent : root.bad)
                     font.family: root.mono; font.pixelSize: 12
                 }
             }
+        }
+    }
+
+    // ---- Layout screen pieces
+    component GrabArea: MouseArea {
+        id: grab
+        property var info: ({})
+        property real pressX: 0
+        property real pressY: 0
+        acceptedButtons: Qt.LeftButton
+        cursorShape: Qt.OpenHandCursor
+        onPressed: function (m) { pressX = m.x; pressY = m.y }
+        onPositionChanged: function (m) {
+            if (!(m.buttons & Qt.LeftButton) || !root.canvasItem) return
+            if (!root.dragInfo && Math.abs(m.x - pressX) + Math.abs(m.y - pressY) > 8) root.beginLayoutDrag(info)
+            if (root.dragInfo) root.moveLayoutDrag(grab.mapToItem(root.canvasItem, m.x, m.y))
+        }
+        onReleased: function (m) { if (root.dragInfo) root.endLayoutDrag() }
+        onCanceled: { root.dragInfo = null; root.dropTarget = null }
+    }
+
+    component MemberChip: Rectangle {
+        id: mchip
+        property var entry: ({})
+        implicitWidth: mlabel.implicitWidth + 10
+        implicitHeight: 18
+        radius: 3
+        color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+        border.color: root.dim; border.width: 1
+        opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
+        Text { id: mlabel; anchors.centerIn: parent; text: String(entry.name).replace(/^My /, ""); color: root.fg; font.family: root.mono; font.pixelSize: 9 }
+        GrabArea { anchors.fill: parent; info: ({ id: mchip.entry.id, name: mchip.entry.name, isTray: false, mainTray: false }) }
+    }
+
+    component Chip: Rectangle {
+        id: chip
+        property var entry: ({})
+        readonly property bool isTray: !!entry.tray
+        readonly property bool mainTray: entry.id === "io.github.tyrichards.tray"
+        readonly property var members: entry.members || []
+        radius: 3
+        color: isTray ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+        border.color: isTray ? root.accent : root.dim
+        border.width: 1
+        implicitWidth: isTray ? 200 : chipLabel.implicitWidth + 12
+        implicitHeight: isTray ? 22 + (members.length ? memberFlow.implicitHeight + 5 : 2) : 20
+        opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
+        Text { id: chipLabel; visible: !chip.isTray; anchors.centerIn: parent; text: String(chip.entry.name).replace(/^My /, "")
+               color: root.fg; font.family: root.mono; font.pixelSize: 10 }
+        Text { visible: chip.isTray; x: 6; y: 3; text: "▣ " + chip.entry.name + (chip.members.length ? "" : "  (empty)")
+               color: root.accent; font.family: root.mono; font.pixelSize: 10; font.bold: true }
+        Flow {
+            id: memberFlow
+            visible: chip.isTray
+            x: 5; y: 22
+            width: chip.width - 10
+            spacing: 3
+            Repeater { model: chip.members; delegate: MemberChip { required property var modelData; entry: modelData } }
+        }
+        // plain chips grab anywhere; a tray only by its header, so its members can be grabbed on their own
+        GrabArea {
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            height: chip.isTray ? 20 : parent.height
+            info: ({ id: chip.entry.id, name: chip.entry.name, isTray: chip.isTray && !chip.mainTray, mainTray: chip.mainTray })
+        }
+    }
+
+    component Zone: Rectangle {
+        id: zone
+        property string edge: ""
+        property string section: ""
+        property string title: ""
+        property var entries: []
+        readonly property real contentH: zflow.implicitHeight + 22
+        Layout.minimumHeight: contentH
+        color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+        border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.5); border.width: 1
+        clip: true
+        Text { x: 5; y: 2; text: zone.title; color: root.dim; font.family: root.mono; font.pixelSize: 9 }
+        Flow {
+            id: zflow
+            x: 4; y: 14
+            width: zone.width - 8
+            spacing: 3
+            Repeater { id: zrep; model: zone.entries; delegate: Chip { required property var modelData; entry: modelData } }
+        }
+        // where each chip sits, in this zone's coordinates (the dragged one left out)
+        function slotInfo(excludeId) {
+            var out = []
+            for (var i = 0; i < zrep.count; i++) {
+                var it = zrep.itemAt(i)
+                if (!it || it.entry.id === excludeId) continue
+                var p = it.mapToItem(zone, 0, 0)
+                out.push({ id: it.entry.id, x: p.x, y: p.y, w: it.width, h: it.height, isTray: it.isTray })
+            }
+            return out
+        }
+        Component.onCompleted: root.registerZone(zone)
+    }
+
+    component BarBox: Rectangle {
+        id: box
+        property string edge: ""
+        property var barData: ({ exists: false, main: false, sections: ({}) })
+        readonly property bool vertical: edge === "left" || edge === "right"
+        readonly property var secs: barData.sections || ({})
+        // how tall the busiest section needs to be (for a top or bottom bar)
+        readonly property real needH: Math.max(zoneA.contentH, zoneB.contentH, zoneC.contentH) + 8
+        color: barData.exists ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08) : "transparent"
+        border.color: barData.exists ? root.accent : Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.5)
+        border.width: 1
+        Text {
+            visible: box.barData.exists
+            anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 3
+            text: box.edge + (box.barData.main ? " · main" : "")
+            color: root.accent; font.family: root.mono; font.pixelSize: 9; font.bold: true; z: 5
+        }
+        GridLayout {
+            anchors.fill: parent; anchors.margins: 3
+            columns: box.vertical ? 1 : 3
+            rowSpacing: 3; columnSpacing: 3
+            visible: box.barData.exists
+            Zone { id: zoneA; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "left"
+                   title: box.vertical ? "top" : "left"; entries: box.secs.left || [] }
+            Zone { id: zoneB; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "center"
+                   title: box.vertical ? "middle" : "center"; entries: box.secs.center || [] }
+            Zone { id: zoneC; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "right"
+                   title: box.vertical ? "bottom" : "right"; entries: box.secs.right || [] }
+        }
+        Btn {
+            visible: !box.barData.exists
+            anchors.centerIn: parent
+            label: box.vertical ? "+" + box.edge.charAt(0).toUpperCase() : "+ add " + box.edge + " bar"
+            onClicked: root.act(["togglebar", box.edge], "Adding the " + box.edge + " bar")
         }
     }
 
