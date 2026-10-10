@@ -319,11 +319,11 @@ Item {
                         color: root.dim; font.family: root.mono; font.pixelSize: 12
                     }
                     Item { Layout.fillWidth: true }
-                    Btn { label: root.view === "list" ? "Layout" : "List"; picked: root.view === "layout"
+                    HeaderBtn { label: root.view === "list" ? "Layout" : "List"; picked: root.view === "layout"
                           onClicked: { root.view = root.view === "list" ? "layout" : "list"; if (root.view === "layout") root.refreshLayout() } }
-                    Btn { label: "+ Tray"; onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
-                    Btn { label: "Update all"; onClicked: root.act(["update", "--all"], "Updating all") }
-                    Btn { label: "Refresh"; onClicked: root.refresh() }
+                    HeaderBtn { label: "+ Tray"; onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
+                    HeaderBtn { label: "Update all"; onClicked: root.act(["update", "--all"], "Updating all") }
+                    HeaderBtn { label: "Refresh"; onClicked: root.refresh() }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.accent }
 
@@ -832,6 +832,33 @@ Item {
             label: box.vertical ? "+" + box.edge.charAt(0).toUpperCase() : "+ add " + box.edge + " bar"
             onClicked: root.act(["togglebar", box.edge], "Adding the " + box.edge + " bar")
         }
+    }
+
+    // Top-bar action button: filled with the theme accent, bigger and bolder than the
+    // row-level Btn, so List / Layout / + Tray / Update all / Refresh stand out as the
+    // screen's primary actions.
+    component HeaderBtn: Rectangle {
+        id: hbtn
+        property string label: ""
+        property bool picked: false
+        signal clicked()
+        implicitWidth: htxt.implicitWidth + 22
+        implicitHeight: 28
+        radius: 4
+        readonly property bool lit: hma.containsMouse || picked
+        color: lit ? root.accent : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+        border.color: root.accent
+        border.width: lit ? 0 : 1.5
+        opacity: root.busy ? 0.5 : 1
+        Behavior on color { ColorAnimation { duration: 90 } }
+        Text {
+            id: htxt
+            anchors.centerIn: parent
+            text: hbtn.label
+            color: hbtn.lit ? root.bg : root.accent
+            font.family: root.mono; font.pixelSize: 12; font.bold: true
+        }
+        MouseArea { id: hma; anchors.fill: parent; hoverEnabled: true; enabled: !root.busy; onClicked: hbtn.clicked() }
     }
 
     // Old-school text button: [ Label ], inverts on hover.
