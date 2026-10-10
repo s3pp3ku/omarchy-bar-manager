@@ -43,6 +43,17 @@ Item {
     }
     function registerZone(z) { zoneItems = zoneItems.concat([z]) }
 
+    // chips show the widget's own icon; widgets we could not read one from get letters
+    function monogram(name) {
+        var words = String(name).replace(/^My /, "").split(/[\s:]+/).filter(function (w) { return w.length })
+        if (words.length >= 2) return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase()
+        return String(words[0] || "?").substring(0, 2)
+    }
+    property var tipItem: null
+    property string tipText: ""
+    function showTip(item, text) { if (!dragInfo) { tipItem = item; tipText = text } }
+    function hideTip(item) { if (tipItem === item) tipItem = null }
+
     function beginLayoutDrag(info) { dragInfo = info; dropTarget = null }
     function moveLayoutDrag(pt) { dragX = pt.x; dragY = pt.y; dropTarget = targetAt(pt.x, pt.y) }
     function endLayoutDrag() {
@@ -334,8 +345,8 @@ Item {
                         readonly property var bars: root.layoutData.bars || ({})
                         function has(e) { return !!(bars[e] && bars[e].exists) }
                         function dataOf(e) { return bars[e] || ({ exists: false, main: false, sections: ({}) }) }
-                        readonly property real topH: has("top") ? Math.min(230, Math.max(70, topBox.needH)) : 34
-                        readonly property real botH: has("bottom") ? Math.min(180, Math.max(70, bottomBox.needH)) : 34
+                        readonly property real topH: has("top") ? Math.min(230, Math.max(60, topBox.needH)) : 34
+                        readonly property real botH: has("bottom") ? Math.min(180, Math.max(60, bottomBox.needH)) : 34
                         readonly property real leftW: has("left") ? sideW : 44
                         readonly property real rightW: has("right") ? sideW : 44
 
@@ -352,6 +363,17 @@ Item {
                             color: root.dim; font.family: root.mono; font.pixelSize: 12
                         }
 
+                        Rectangle {   // hover label: which widget a chip is
+                            z: 70
+                            visible: root.tipItem !== null && root.dragInfo === null
+                            readonly property point at: root.tipItem ? root.tipItem.mapToItem(canvas, 0, root.tipItem.height + 4) : Qt.point(0, 0)
+                            x: Math.max(0, Math.min(canvas.width - width, at.x))
+                            y: Math.min(canvas.height - height, at.y)
+                            width: tipLabel.implicitWidth + 14; height: tipLabel.implicitHeight + 8
+                            color: root.bg; border.color: root.accent; border.width: 1; radius: 3
+                            Text { id: tipLabel; anchors.centerIn: parent; text: root.tipText
+                                   color: root.fg; font.family: root.mono; font.pixelSize: 11 }
+                        }
                         Rectangle {   // drop marker
                             z: 50
                             visible: root.dropTarget !== null
@@ -551,13 +573,21 @@ Item {
     component MemberChip: Rectangle {
         id: mchip
         property var entry: ({})
-        implicitWidth: mlabel.implicitWidth + 10
-        implicitHeight: 18
+        implicitWidth: 22
+        implicitHeight: 20
         radius: 3
         color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
         border.color: root.dim; border.width: 1
         opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
-        Text { id: mlabel; anchors.centerIn: parent; text: String(entry.name).replace(/^My /, ""); color: root.fg; font.family: root.mono; font.pixelSize: 9 }
+        Text {
+            anchors.centerIn: parent
+            text: mchip.entry.icon ? mchip.entry.icon : root.monogram(mchip.entry.name)
+            color: root.fg
+            font.family: mchip.entry.icon ? Style.font.family : root.mono
+            font.pixelSize: mchip.entry.icon ? 13 : 9
+            font.bold: !mchip.entry.icon
+        }
+        HoverHandler { onHoveredChanged: { if (hovered) root.showTip(mchip, mchip.entry.name + "\n" + mchip.entry.id); else root.hideTip(mchip) } }
         GrabArea { anchors.fill: parent; info: ({ id: mchip.entry.id, name: mchip.entry.name, isTray: false, mainTray: false }) }
     }
 
@@ -571,12 +601,20 @@ Item {
         color: isTray ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
         border.color: isTray ? root.accent : root.dim
         border.width: 1
-        implicitWidth: isTray ? 200 : chipLabel.implicitWidth + 12
-        implicitHeight: isTray ? 22 + (members.length ? memberFlow.implicitHeight + 5 : 2) : 20
+        // a tray is as wide as its icons need (up to a limit, then they wrap)
+        implicitWidth: isTray ? Math.min(230, Math.max(70, members.length * 25 + 10)) : 28
+        implicitHeight: isTray ? 22 + (members.length ? memberFlow.implicitHeight + 5 : 2) : 24
         opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
-        Text { id: chipLabel; visible: !chip.isTray; anchors.centerIn: parent; text: String(chip.entry.name).replace(/^My /, "")
-               color: root.fg; font.family: root.mono; font.pixelSize: 10 }
-        Text { visible: chip.isTray; x: 6; y: 3; text: "▣ " + chip.entry.name + (chip.members.length ? "" : "  (empty)")
+        Text {
+            visible: !chip.isTray
+            anchors.centerIn: parent
+            text: chip.entry.icon ? chip.entry.icon : root.monogram(chip.entry.name)
+            color: root.fg
+            font.family: chip.entry.icon ? Style.font.family : root.mono
+            font.pixelSize: chip.entry.icon ? 15 : 10
+            font.bold: !chip.entry.icon
+        }
+        Text { visible: chip.isTray; x: 6; y: 3; text: "▣ " + (chip.mainTray ? "tray" : String(chip.entry.name).replace(/^Tray /, "")) + (chip.members.length ? "" : " (empty)")
                color: root.accent; font.family: root.mono; font.pixelSize: 10; font.bold: true }
         Flow {
             id: memberFlow
@@ -586,6 +624,7 @@ Item {
             spacing: 3
             Repeater { model: chip.members; delegate: MemberChip { required property var modelData; entry: modelData } }
         }
+        HoverHandler { onHoveredChanged: { if (hovered) root.showTip(chip, chip.entry.name + "\n" + chip.entry.id); else root.hideTip(chip) } }
         // plain chips grab anywhere; a tray only by its header, so its members can be grabbed on their own
         GrabArea {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Print {plugin-id: glyph} for every bar widget, read from the widget's own QML.
+
+A widget draws its icon as a Nerd Font glyph in a string (a \\uXXXX escape or the literal
+character). We take the first one found in the widget file, or failing that in the other
+QML files next to it. Cached in ~/.cache/barctl-icons.json until a widget file changes."""
+import json, os, re, subprocess, sys, glob
+
+CACHE = os.path.expanduser("~/.cache/barctl-icons.json")
+ESC = re.compile(r'\\u([eEfF][0-9a-fA-F]{3})')
+LIT = re.compile('[\ue000-\uf8ff\U000f0000-\U000ffffd]')
+
+def glyph_in(text):
+    best = None
+    for m in re.finditer(r'\\u([eEfF][0-9a-fA-F]{3})|([\ue000-\uf8ff\U000f0000-\U000ffffd])', text):
+        g = chr(int(m.group(1), 16)) if m.group(1) else m.group(2)
+        if g in ("\uf053", "\uf054", "\uf077", "\uf078"):   # chevrons are UI, not the widget's icon
+            continue
+        return g
+    return best
+
+def main():
+    cat = json.loads(subprocess.run(["omarchy-plugin-catalog"], capture_output=True, text=True).stdout or "[]")
+    files = {}
+    for p in cat:
+        wp = p.get("barWidgetPath")
+        if wp: files[p["id"]] = (wp, p.get("sourceDir") or os.path.dirname(wp))
+    stamp = {i: max([os.path.getmtime(w)] + [os.path.getmtime(f) for f in glob.glob(os.path.join(d, "*.qml"))[:8]])
+             for i, (w, d) in files.items() if os.path.exists(w)}
+    try:
+        old = json.load(open(CACHE))
+        if old.get("stamp") == stamp: print(json.dumps(old["icons"], ensure_ascii=False)); return
+    except Exception: pass
+    icons = {}
+    for i, (w, d) in files.items():
+        cands = [w] + [f for f in sorted(glob.glob(os.path.join(d, "*.qml"))) if f != w][:6]
+        for f in cands:
+            try: g = glyph_in(open(f, encoding="utf-8", errors="ignore").read())
+            except OSError: g = None
+            if g: icons[i] = g; break
+    # a glyph shared by several plugins is a generic placeholder, not a real icon: leave those to the letters fallback
+    from collections import Counter
+    uses = Counter(icons.values())
+    icons = {i: g for i, g in icons.items() if uses[g] <= 2}
+    # widgets whose icon can't be read from their code (they draw it indirectly, or share a placeholder)
+    FALLBACK = {
+        "s3pp3ku.workspaces": "\uf009", "omarchy.workspaces": "\uf009",
+        "s3pp3ku.indicators": "\U000f02fc", "omarchy.indicators": "\U000f02fc",
+        "s3pp3ku.keyboard-layout": "\uf11c", "omarchy.keyboard-layout": "\uf11c",
+        "s3pp3ku.power": "\uf011", "omarchy.power": "\uf011",
+        "s3pp3ku.mpd": "\uf001", "s3pp3ku.omavoid": "\uf11b",
+        "s3pp3ku.stoa": "\uf06c", "io.github.qempexe.omaudix": "\uf025",
+        "foamy.notification-center": "\uf0f3", "omarchy.active-window": "\U000f05b8",
+    }
+    for i, g in FALLBACK.items():
+        icons.setdefault(i, g)
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    json.dump({"stamp": stamp, "icons": icons}, open(CACHE, "w"), ensure_ascii=False)
+    print(json.dumps(icons, ensure_ascii=False))
+main()

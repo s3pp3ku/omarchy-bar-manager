@@ -363,17 +363,19 @@ cmd_intray() {  # cmd_intray <widget-id> <tray-id>: move a widget into a tray
 }
 
 cmd_layout() {  # JSON picture of every bar for the Layout screen
-  local cat; cat=$(omarchy-plugin-catalog)
-  jq -n --argjson cat "$cat" --arg main "$(main_pos)" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
+  local cat icons; cat=$(omarchy-plugin-catalog); icons=$("$(dirname "${BASH_SOURCE[0]}")/barctl-icons" 2>/dev/null || echo '{}')
+  [[ -n $icons ]] || icons='{}'
+  jq -n --argjson cat "$cat" --argjson icons "$icons" --arg main "$(main_pos)" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
     ($cat | map({key: .id, value: (.name // .id)}) | from_entries) as $names
     | def nm($id): ($names[$id] // $id);
-    def mainEntry: {id, name: nm(.id), tray: (.widgets != null),
-                    members: ((.widgets // []) | map({id: .entry.id, name: nm(.entry.id)}))};
+    def ic($id): ($icons[$id] // "");
+    def mainEntry: {id, name: nm(.id), icon: ic(.id), tray: (.widgets != null),
+                    members: ((.widgets // []) | map({id: .entry.id, name: nm(.entry.id), icon: ic(.entry.id)}))};
     def extraEntry:
       if type == "object"
-      then {id: .id, name: (if (.id | startswith("tray:")) then "Tray " + (.id | ltrimstr("tray:")) else nm(.id) end),
-            tray: ((.id | startswith("tray:"))), members: ((.widgets // []) | map({id: ., name: nm(.)}))}
-      else {id: ., name: nm(.), tray: false, members: []} end;
+      then {id: .id, name: (if (.id | startswith("tray:")) then "Tray " + (.id | ltrimstr("tray:")) else nm(.id) end), icon: ic(.id),
+            tray: ((.id | startswith("tray:"))), members: ((.widgets // []) | map({id: ., name: nm(.), icon: ic(.)}))}
+      else {id: ., name: nm(.), icon: ic(.), tray: false, members: []} end;
     def secs(f): {left: ((.left // []) | map(f)), center: ((.center // []) | map(f)), right: ((.right // []) | map(f))};
     {main: $main,
      bars: (["top","bottom","left","right"] | map(. as $e |
