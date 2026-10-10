@@ -4,6 +4,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Ui
 
 // Panel-kind plugin: manage which bar widgets are enabled / on the bar.
 // All real work is done by bin/barctl; this is only a front end for it.
@@ -315,15 +316,22 @@ Item {
                     spacing: 12
                     Text { text: "BAR MANAGER"; color: root.accent; font.family: root.mono; font.pixelSize: 15; font.bold: true }
                     Text {
+                        id: countText
                         text: (root.filter ? root.shown.length + " of " : "") + root.items.length + " plugins"
                         color: root.dim; font.family: root.mono; font.pixelSize: 12
+                        HoverHandler { id: countHover }
+                        PanelToolTip { visible: countHover.hovered; text: "Every bar widget this Omarchy install has, enabled or not" }
                     }
                     Item { Layout.fillWidth: true }
                     HeaderBtn { label: root.view === "list" ? "Layout" : "List"; picked: root.view === "layout"
+                          tip: root.view === "list" ? "See every bar as a picture and drag widgets between them" : "Back to the plain list of plugins"
                           onClicked: { root.view = root.view === "list" ? "layout" : "list"; if (root.view === "layout") root.refreshLayout() } }
-                    HeaderBtn { label: "+ Tray"; onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
-                    HeaderBtn { label: "Update all"; onClicked: root.act(["update", "--all"], "Updating all") }
-                    HeaderBtn { label: "Refresh"; onClicked: root.refresh() }
+                    HeaderBtn { label: "+ Tray"; tip: "Add a new empty tray (a chevron drawer) to an extra bar"
+                          onClicked: root.act(["addtray", "auto", "right"], "Adding a tray") }
+                    HeaderBtn { label: "Update all"; tip: "Check every plugin for an update and install it"
+                          onClicked: root.act(["update", "--all"], "Updating all") }
+                    HeaderBtn { label: "Refresh"; tip: "Re-read the plugin list and bar layout from disk"
+                          onClicked: root.refresh() }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.accent }
 
@@ -333,6 +341,7 @@ Item {
                     spacing: 6
                     Text { text: "Search:"; color: root.dim; font.family: root.mono; font.pixelSize: 13 }
                     Rectangle {
+                        id: searchBox
                         Layout.fillWidth: true
                         height: 24
                         color: "transparent"; border.color: root.dim; border.width: 1
@@ -343,6 +352,9 @@ Item {
                             verticalAlignment: TextInput.AlignVCenter
                             onTextChanged: root.filter = text
                         }
+                        HoverHandler { id: searchHover }
+                        PanelToolTip { visible: searchHover.hovered && !root.filter
+                            text: "Type a word to find a plugin — rough ones work too, like \"sound\" for Audio" }
                     }
                 }
 
@@ -352,10 +364,26 @@ Item {
                     Layout.fillWidth: true
                     Layout.leftMargin: 6; Layout.rightMargin: 6
                     spacing: 6
-                    Text { text: "BAR"; Layout.preferredWidth: 28; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "PLUGIN"; Layout.fillWidth: true; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "BAR / SECTION"; Layout.preferredWidth: 250; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
-                    Text { text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11 }
+                    Text {
+                        text: "BAR"; Layout.preferredWidth: 28; color: root.dim; font.family: root.mono; font.pixelSize: 11
+                        HoverHandler { id: h1 }
+                        PanelToolTip { visible: h1.hovered; text: "[x] is on a bar right now, [ ] is not" }
+                    }
+                    Text {
+                        text: "PLUGIN"; Layout.fillWidth: true; color: root.dim; font.family: root.mono; font.pixelSize: 11
+                        HoverHandler { id: h2 }
+                        PanelToolTip { visible: h2.hovered; text: "Name and id; dim means disabled. Hover a row's name for its description" }
+                    }
+                    Text {
+                        text: "BAR / SECTION"; Layout.preferredWidth: 250; color: root.dim; font.family: root.mono; font.pixelSize: 11
+                        HoverHandler { id: h3 }
+                        PanelToolTip { visible: h3.hovered; text: "T B L R: click a bar to add or remove the widget there (several at once). ‹ · › picks where in the bar" }
+                    }
+                    Text {
+                        text: "ACTIONS"; Layout.preferredWidth: 215; color: root.dim; font.family: root.mono; font.pixelSize: 11
+                        HoverHandler { id: h4 }
+                        PanelToolTip { visible: h4.hovered; text: "Show/Hide, enable/disable, update, or remove this plugin" }
+                    }
                 }
                 Rectangle { visible: root.view === "list"; Layout.fillWidth: true; height: 1; color: root.dim }
 
@@ -484,8 +512,12 @@ Item {
                                 text: row.modelData.onBar ? "[x]" : "[ ]"
                                 color: row.modelData.onBar ? root.accent : root.dim
                                 font.family: root.mono; font.pixelSize: 13
+                                HoverHandler { id: onBarHover }
+                                PanelToolTip { visible: onBarHover.hovered
+                                    text: row.modelData.onBar ? "On a bar right now" : "Not on any bar" }
                             }
                             ColumnLayout {
+                                id: nameCol
                                 Layout.fillWidth: true
                                 Layout.minimumWidth: 100
                                 spacing: 0
@@ -501,6 +533,9 @@ Item {
                                           (row.modelData.enabled ? "" : "  (disabled)") + (row.modelData.firstParty ? "  (built-in)" : "")
                                     color: root.dim; font.family: root.mono; font.pixelSize: 10; elide: Text.ElideRight
                                 }
+                                HoverHandler { id: nameHover }
+                                PanelToolTip { visible: nameHover.hovered && row.modelData.description !== ""
+                                    text: row.modelData.description }
                             }
 
                             // Pick the bar (Top / Bottom / Left / Right) and the section (left / center / right).
@@ -514,7 +549,7 @@ Item {
                                         // a widget can be on several bars at once: each letter adds or removes that bar
                                         picked: row.modelData.isTray ? (row.modelData.bar === modelData.k)
                                                                      : (row.modelData.bars || []).indexOf(modelData.k) !== -1
-                                        tip: "Toggle the " + modelData.k + " bar"
+                                        tip: (picked ? "Take it off the " : "Put it on the ") + modelData.k + " bar"
                                         onClicked: {
                                             if (row.modelData.isTray)
                                                 root.act(["place", row.modelData.id, modelData.k, row.curSection()], "Moving to " + modelData.k)
@@ -525,15 +560,19 @@ Item {
                                 }
                             }
                             Row {
+                                readonly property bool vert: row.modelData.bar === "left" || row.modelData.bar === "right"
                                 spacing: 2
                                 Repeater {
-                                    model: (row.modelData.bar === "left" || row.modelData.bar === "right")
+                                    model: parent.vert
                                        ? [{ k: "left", t: "↑" }, { k: "center", t: "·" }, { k: "right", t: "↓" }]
                                        : [{ k: "left", t: "‹" }, { k: "center", t: "·" }, { k: "right", t: "›" }]
                                     Btn {
                                         required property var modelData
                                         label: modelData.t
                                         picked: row.modelData.onBar && row.curSection() === modelData.k && row.modelData.section !== "tray"
+                                        tip: parent.vert
+                                            ? ({ left: "Top of the bar", center: "Middle of the bar", right: "Bottom of the bar" }[modelData.k])
+                                            : ({ left: "Left of the bar", center: "Center of the bar", right: "Right of the bar" }[modelData.k])
                                         onClicked: root.act(row.modelData.isTray
                                             ? ["place", row.modelData.id, row.modelData.bar, modelData.k]
                                             : ["setsection", row.modelData.id, modelData.k], "Moving")
@@ -544,6 +583,8 @@ Item {
                                 visible: !row.modelData.isTray
                                 label: row.modelData.tray ? "▣" + row.modelData.tray.replace("tray:", "") : "▢"
                                 picked: !!row.modelData.tray
+                                tip: row.modelData.tray ? "In " + row.modelData.tray + " — click to move to the next tray, or out onto the bar"
+                                                         : "Click to put this widget in a tray instead of directly on the bar"
                                 onClicked: {
                                     // cycle: none -> first tray -> next tray ... -> none (back onto the bar)
                                     var trays = []
@@ -560,28 +601,33 @@ Item {
                                 Btn {
                                     visible: !row.modelData.isTray
                                     label: row.modelData.onBar ? "Hide" : "Show"
+                                    tip: row.modelData.onBar ? "Take it off the bar (stays installed and enabled)" : "Put it back on the bar, where it was"
                                     onClicked: root.act([row.modelData.onBar ? "hide" : "show", row.modelData.id], row.modelData.onBar ? "Hiding" : "Showing")
                                 }
                                 Btn {
                                     visible: !row.modelData.isTray
                                     label: row.modelData.enabled ? "Off" : "On"
+                                    tip: row.modelData.enabled ? "Disable this plugin (also takes it off the bar)" : "Enable this plugin"
                                     onClicked: root.act([row.modelData.enabled ? "disable" : "enable", row.modelData.id], row.modelData.enabled ? "Disabling" : "Enabling")
                                 }
                                 Btn {
                                     visible: row.modelData.canManage
                                     label: "Upd"
+                                    tip: "Check this plugin for an update and install it"
                                     onClicked: root.act(["update", row.modelData.id], "Updating")
                                 }
                                 Btn {
                                     visible: row.modelData.isTray === true
                                     danger: true
                                     label: "Del"
+                                    tip: "Remove this tray — its widgets stay on the bar"
                                     onClicked: root.act(["rmtray", row.modelData.id], "Removing tray")
                                 }
                                 Btn {
                                     visible: row.modelData.canManage
                                     danger: true
                                     label: root.confirmId === row.modelData.id ? "Sure?" : "Del"
+                                    tip: root.confirmId === row.modelData.id ? "Click again to remove the plugin's files" : "Uninstall this plugin"
                                     onClicked: {
                                         if (root.confirmId === row.modelData.id) root.act(["uninstall", row.modelData.id], "Uninstalling")
                                         else root.confirmId = row.modelData.id
@@ -830,6 +876,7 @@ Item {
             visible: !box.barData.exists
             anchors.centerIn: parent
             label: box.vertical ? "+" + box.edge.charAt(0).toUpperCase() : "+ add " + box.edge + " bar"
+            tip: "Add a " + box.edge + " bar, so you can put widgets on it"
             onClicked: root.act(["togglebar", box.edge], "Adding the " + box.edge + " bar")
         }
     }
@@ -841,6 +888,7 @@ Item {
         id: hbtn
         property string label: ""
         property bool picked: false
+        property string tip: ""
         signal clicked()
         implicitWidth: htxt.implicitWidth + 22
         implicitHeight: 28
@@ -859,6 +907,7 @@ Item {
             font.family: root.mono; font.pixelSize: 12; font.bold: true
         }
         MouseArea { id: hma; anchors.fill: parent; hoverEnabled: true; enabled: !root.busy; onClicked: hbtn.clicked() }
+        PanelToolTip { visible: hbtn.tip !== "" && hma.containsMouse; text: hbtn.tip }
     }
 
     // Old-school text button: [ Label ], inverts on hover.
@@ -884,5 +933,6 @@ Item {
             font.family: root.mono; font.pixelSize: 11
         }
         MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; enabled: !root.busy; onClicked: btn.clicked() }
+        PanelToolTip { visible: btn.tip !== "" && ma.containsMouse; text: btn.tip }
     }
 }

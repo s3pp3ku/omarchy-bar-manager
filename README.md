@@ -41,6 +41,10 @@ Each row has pickers for the bars (T B L R) and the section (‹ · ›), for in
 - Omarchy with the shell plugin system (`omarchy plugin`, `omarchy-shell`)
 - `jq`
 
+## Hover descriptions
+
+Every control — the header buttons, column headers, the search box, the on-bar indicator, a row's name (its full description, if it has one), the bar/section pickers, the tray button, and every action button — shows a short tooltip on hover explaining what it does.
+
 ## Install
 
 ```sh
