@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -359,16 +360,26 @@ Item {
                 Rectangle { visible: root.view === "list"; Layout.fillWidth: true; height: 1; color: root.dim }
 
                 // ---- Layout screen: every bar drawn as it sits on the screen; drag chips between slots
-                Item {
+                Flickable {
+                    id: layoutFlick
                     visible: root.view === "layout"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    // sized to what the bars actually need, so a narrow/tiled window scrolls instead of
+                    // squashing them; never smaller than the viewport, so it still fills a roomy window
+                    contentWidth: Math.max(width, canvas.leftW + canvas.rightW + 330)
+                    contentHeight: Math.max(height, canvas.topH + canvas.botH + Math.max(300, canvas.leftStackH, canvas.rightStackH))
+                    ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                     Item {
                         id: canvas
-                        anchors.fill: parent
+                        width: layoutFlick.contentWidth
+                        height: layoutFlick.contentHeight
                         Component.onCompleted: root.canvasItem = canvas
                         readonly property real hThick: 124
-                        readonly property real sideW: 180
+                        readonly property real sideW: 210
                         readonly property var bars: root.layoutData.bars || ({})
                         function has(e) { return !!(bars[e] && bars[e].exists) }
                         function dataOf(e) { return bars[e] || ({ exists: false, main: false, sections: ({}) }) }
@@ -376,12 +387,15 @@ Item {
                         readonly property real botH: has("bottom") ? Math.min(180, Math.max(60, bottomBox.needH)) : 34
                         readonly property real leftW: has("left") ? sideW : 44
                         readonly property real rightW: has("right") ? sideW : 44
+                        // how tall the three stacked sections of a side bar actually need (so the bar below never overlaps)
+                        readonly property real leftStackH: has("left") ? leftBox.stackNeedH : 0
+                        readonly property real rightStackH: has("right") ? rightBox.stackNeedH : 0
 
                         // top and bottom span the full width; the side bars run between them (as on the real screen)
                         BarBox { id: topBox; edge: "top"; barData: canvas.dataOf("top"); x: 0; y: 0; width: canvas.width; height: canvas.topH }
                         BarBox { id: bottomBox; edge: "bottom"; barData: canvas.dataOf("bottom"); x: 0; y: canvas.height - canvas.botH; width: canvas.width; height: canvas.botH }
-                        BarBox { edge: "left"; barData: canvas.dataOf("left"); x: 0; y: canvas.topH; width: canvas.leftW; height: canvas.height - canvas.topH - canvas.botH }
-                        BarBox { edge: "right"; barData: canvas.dataOf("right"); x: canvas.width - canvas.rightW; y: canvas.topH; width: canvas.rightW; height: canvas.height - canvas.topH - canvas.botH }
+                        BarBox { id: leftBox; edge: "left"; barData: canvas.dataOf("left"); x: 0; y: canvas.topH; width: canvas.leftW; height: canvas.height - canvas.topH - canvas.botH }
+                        BarBox { id: rightBox; edge: "right"; barData: canvas.dataOf("right"); x: canvas.width - canvas.rightW; y: canvas.topH; width: canvas.rightW; height: canvas.height - canvas.topH - canvas.botH }
 
                         Text {
                             anchors.centerIn: parent
@@ -643,6 +657,7 @@ Item {
     component Chip: Rectangle {
         id: chip
         property var entry: ({})
+        property real maxW: 999
         readonly property bool isTray: !!entry.tray
         readonly property bool mainTray: entry.id === "io.github.tyrichards.tray"
         readonly property var members: entry.members || []
@@ -650,8 +665,10 @@ Item {
         color: isTray ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
         border.color: isTray ? root.accent : root.dim
         border.width: 1
-        // a tray is as wide as its icons need (up to a limit, then they wrap)
-        implicitWidth: isTray ? Math.min(230, Math.max(70, members.length * 25 + 10)) : 28
+        // a tray is as wide as its icons need, capped to what the bar actually has room for — past
+        // that the icons wrap into more rows instead of being cut off
+        readonly property real trayCap: Math.max(70, Math.min(230, chip.maxW))
+        implicitWidth: isTray ? Math.min(trayCap, Math.max(70, members.length * 25 + 10)) : 28
         implicitHeight: isTray ? 22 + (members.length ? memberFlow.implicitHeight + 5 : 2) : 24
         opacity: root.dragInfo && root.dragInfo.id === entry.id ? 0.35 : 1
         readonly property bool iconIsImage: String(entry.icon || "").indexOf("img:") === 0
@@ -696,6 +713,7 @@ Item {
         id: cell
         property var entry: ({})
         property int num: 1
+        property real maxW: 999
         readonly property bool spare: !!entry.spare
         readonly property bool dragged: !spare && root.dragInfo !== null && root.dragInfo.id === entry.id
         readonly property bool target: root.dropTarget !== null && root.dropTarget.cellKey === cellKey
@@ -717,7 +735,7 @@ Item {
             id: chipHolder
             active: !cell.spare
             x: 4; y: 10
-            sourceComponent: Component { Chip { entry: cell.entry } }
+            sourceComponent: Component { Chip { entry: cell.entry; maxW: cell.maxW } }
         }
     }
 
@@ -727,8 +745,13 @@ Item {
         property string section: ""
         property string title: ""
         property var entries: []
+        // on a side bar, cells read top-to-bottom in a single column, matching the real widget
+        // order on screen; on top/bottom they read left-to-right, wrapping into more rows as needed
+        property bool vertical: false
         readonly property real contentH: zflow.implicitHeight + 22
+        readonly property real contentW: zflow.implicitWidth + 8
         Layout.minimumHeight: contentH
+        Layout.minimumWidth: vertical ? contentW : 0
         color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
         border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.5); border.width: 1
         clip: true
@@ -736,12 +759,19 @@ Item {
         Flow {
             id: zflow
             x: 4; y: 14
-            width: zone.width - 8
+            width: zone.vertical ? zone.width - 8 : zone.width - 8
+            flow: zone.vertical ? Flow.TopToBottom : Flow.LeftToRight
             spacing: 3
             Repeater {
                 id: zrep
                 model: (zone.entries || []).concat([{ spare: true, id: "" }])
-                delegate: Cell { required property var modelData; required property int index; entry: modelData; num: index + 1 }
+                delegate: Cell {
+                    required property var modelData
+                    required property int index
+                    entry: modelData
+                    num: index + 1
+                    maxW: zone.width - 10
+                }
             }
         }
         // where each cell with a widget sits, in this zone's coordinates (the dragged one left out)
@@ -771,8 +801,10 @@ Item {
         property var barData: ({ exists: false, main: false, sections: ({}) })
         readonly property bool vertical: edge === "left" || edge === "right"
         readonly property var secs: barData.sections || ({})
-        // how tall the busiest section needs to be (for a top or bottom bar)
+        // how tall the busiest section needs to be (for a top or bottom bar, where the 3 sections run side by side)
         readonly property real needH: Math.max(zoneA.contentH, zoneB.contentH, zoneC.contentH) + 8
+        // how tall all 3 sections need stacked together (for a side bar, where they run one above the other)
+        readonly property real stackNeedH: zoneA.contentH + zoneB.contentH + zoneC.contentH + 12
         color: barData.exists ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08) : "transparent"
         border.color: barData.exists ? root.accent : Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.5)
         border.width: 1
@@ -788,11 +820,11 @@ Item {
             rowSpacing: 3; columnSpacing: 3
             visible: box.barData.exists
             Zone { id: zoneA; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "left"
-                   title: box.vertical ? "top" : "left"; entries: box.secs.left || [] }
+                   vertical: box.vertical; title: box.vertical ? "top" : "left"; entries: box.secs.left || [] }
             Zone { id: zoneB; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "center"
-                   title: box.vertical ? "middle" : "center"; entries: box.secs.center || [] }
+                   vertical: box.vertical; title: box.vertical ? "middle" : "center"; entries: box.secs.center || [] }
             Zone { id: zoneC; Layout.fillWidth: true; Layout.fillHeight: true; edge: box.edge; section: "right"
-                   title: box.vertical ? "bottom" : "right"; entries: box.secs.right || [] }
+                   vertical: box.vertical; title: box.vertical ? "bottom" : "right"; entries: box.secs.right || [] }
         }
         Btn {
             visible: !box.barData.exists

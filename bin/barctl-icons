@@ -65,7 +65,7 @@ def main():
         live = json.load(open(os.path.expanduser("~/.cache/barctl-icons-live.json")))
     except Exception:
         live = {}
-    KEEP_STATIC = {"s3pp3ku.omavoid"}   # chosen on purpose: the game controller reads better than the sprite
+    KEEP_STATIC = {"s3pp3ku.omavoid", "io.github.qempexe.omaudix"}   # chosen on purpose: static reads better than a transient idle/paused state
     for i, v in live.items():
         if i in KEEP_STATIC: continue
         if v.startswith("img:"):
