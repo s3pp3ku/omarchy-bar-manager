@@ -1,0 +1,1 @@
+Shortcut helper adapted from Fross's Omaplug (MIT). See licenses/Omaplug.txt. Marketplace browsing and placement inspired by Juan Casanueva's Plugin Manager (MIT); license retained in licenses/Plugin-Manager.txt. Marketplace commands are parsed as data and never executed as shell text.

@@ -1,458 +1,381 @@
-#!/bin/bash
-# barctl — manage which plugins show in the Omarchy bar.
-#   barctl list                 JSON for the UI
-#   barctl enable|disable <id>  turn a plugin on/off (disable also takes it off the bar)
-#   barctl update <id>|--all    omarchy plugin update
-#   barctl uninstall <id>       omarchy plugin remove
-#   barctl hide <id>            take off the bar, keep installed + enabled
-#   barctl show <id>            put back on the bar (same spot it was hidden from)
-#   barctl place <id> <top|bottom|left|right> [left|center|right]
-#                               move a widget to any bar (extra bars live in extra-bars.json)
-#   barctl fix                  drop duplicate tray entries
-set -euo pipefail
+#!/usr/bin/env python3
+"""Multi-bar layout history, persistence and reviewed plugin updates."""
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
 
-CFG="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
-EXTRA="${OMARCHY_EXTRA_BARS_JSON:-$HOME/.config/omarchy/extra-bars.json}"
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-hidden.json"
+HOME = Path.home()
+CFG = Path(os.environ.get('OMARCHY_SHELL_JSON', HOME / '.config/omarchy/shell.json'))
+EXTRA = Path(os.environ.get('OMARCHY_EXTRA_BARS_JSON', HOME / '.config/omarchy/extra-bars.json'))
+STATE = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state'))
+DATA = STATE / 'bar-manager'
+PLUGINS = Path(os.environ.get('BARCTL_PLUGINS_DIR', HOME / '.config/omarchy/plugins'))
+CORE = Path(__file__).with_name('barctl-core')
+MEMORIES = ['barctl-hidden.json', 'barctl-removed-main-entries.json', 'barctl-removed-bars.json']
+BAR_KEYS = ['layout', 'position', 'transparent', 'centerAnchor']
+MUTATIONS = {'place', 'drop', 'toggle', 'setsection', 'hide', 'show', 'enable', 'disable', 'fix', 'togglebar', 'mainpos', 'swapbars', 'addtray', 'rmtray', 'intray', 'reorder', 'move-section'}
 
-backup() { cp -f "$CFG" "$CFG.bak.barctl-$(date +%s)"; ls -t "$CFG".bak.barctl-* 2>/dev/null | tail -n +6 | xargs -r rm -f; }
 
-# jq: collapse repeated tray wrappers / order tokens (the cause of doubled icons).
-DEDUPE='
-  def uniq_by_key(f): reduce .[] as $x ([]; if any(.[]; f == ($x | f)) then . else . + [$x] end);
-  def uniq_tokens: reduce .[] as $x ([]; if index($x) != null then . else . + [$x] end);
-  .bar.layout |= with_entries(.value |= map(
-    if .widgets then .widgets |= uniq_by_key(.entry.id) else . end
-    | if .order then .order |= uniq_tokens else . end))'
+def read(path, default=None):
+    return json.loads(path.read_text()) if path.exists() else default
 
-apply() {  # apply <jq filter> [jq args...]
-  local filter="$1"; shift
-  local tmp; tmp=$(mktemp)
-  jq "$@" "$filter | $DEDUPE" "$CFG" >"$tmp"
-  backup
-  mv "$tmp" "$CFG"
-}
 
-state_get() { [[ -f $STATE ]] && jq -c --arg id "$1" '.[$id] // empty' "$STATE" || true; }
-state_set() { local cur='{}'; [[ -f $STATE ]] && cur=$(cat "$STATE"); jq --arg id "$1" --argjson v "$2" '.[$id]=$v' <<<"$cur" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
-state_del() { [[ -f $STATE ]] && jq --arg id "$1" 'del(.[$id])' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE" || true; }
+def write(path, obj):
+    # Follow dotfile symlinks and preserve the target's permissions.
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        os.fchmod(fd, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(obj, stream, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
-# ---- extra bars (extra-bars.json) -------------------------------------------
-extra_find() {  # extra_find <id> -> {"bar":"bottom","section":"right"[,"tray":"tray:t1"]} or empty
-  [[ -f $EXTRA ]] || return 0
-  jq -c --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
-    [.bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[]
-      | if eid == $id then {bar: $p, section: $s}
-        elif (type == "object" and ((.widgets // []) | index($id)) != null) then {bar: $p, section: $s, tray: .id}
-        else empty end] | first // empty' "$EXTRA"
-}
-extra_remove() {  # extra_remove <id>: from every section and out of every tray; a bar this leaves empty goes away
-  [[ -f $EXTRA ]] || return 0
-  local tmp; tmp=$(mktemp)
-  jq --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
-    def count: ((.left // []) + (.center // []) + (.right // [])) | length;
-    .bars |= map(
-      count as $before
-      | (.left, .center, .right) |= (if . then map(select(eid != $id) | if type == "object" and .widgets then .widgets |= map(select(. != $id)) else . end) else . end)
-      | if $before > 0 and count == 0 then empty else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-}
-extra_add() {  # extra_add <id> <position> <section> [before-id]
-  extra_add_obj "\"$1\"" "$2" "$3" "${4:-}"
-}
-extra_add_obj() {  # extra_add_obj <json-entry> <position> <section> [before-id]: a string id or a tray object; inserted before another entry if given, else at the end
-  local tmp; tmp=$(mktemp); [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  jq --argjson e "$1" --arg p "$2" --arg s "$3" --arg before "${4:-}" 'def eid: if type == "object" then (.id // "") else . end;
-      ($e | eid) as $eid
-      | .bars = (.bars // [])
-      | (if any(.bars[]; .position == $p) then . else .bars += [{position: $p, left: [], center: [], right: []}] end)
-      | .bars |= map(if .position == $p then
-          .[$s] = (((.[$s] // []) | map(select(eid != $eid))) as $rest
-            | ($rest | map(eid) | index($before)) as $i
-            | if $before != "" and $i != null then ($rest[:$i] + [$e] + $rest[$i:]) else ($rest + [$e]) end)
-        else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-}
-extra_entry() {  # extra_entry <id>: the stored entry (string or object) for an id, else empty
-  [[ -f $EXTRA ]] || return 0
-  jq -c --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
-    [.bars[]? | (.left, .center, .right)[]? | select(eid == $id)] | first // empty' "$EXTRA"
-}
-needs_service() {  # service+widget plugins must sit directly on a bar, never inside the tray
-  omarchy-plugin-catalog | jq -e --arg id "$1" 'any(.[]; .id == $id and ((.kinds // []) | index("service")))' >/dev/null
-}
-MAIN_SAVED="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-removed-main-entries.json"
 
-layout_strip() {  # layout_strip <id>: take it off the main bar and out of every tray (enabling a plugin puts it there by default).
-  # An entry with settings of its own (the Tray's widget list, a clock's format...) is remembered and comes back with layout_add.
-  local entry; entry=$(jq -c --arg id "$1" '[.bar.layout[][] | select(.id == $id and (keys | length) > 1)][0] // empty' "$CFG")
-  if [[ -n $entry ]]; then
-    mkdir -p "$(dirname "$MAIN_SAVED")"; [[ -f $MAIN_SAVED ]] || echo '{}' >"$MAIN_SAVED"
-    jq --arg id "$1" --argjson e "$entry" '.[$id] = $e' "$MAIN_SAVED" >"$MAIN_SAVED.tmp" && mv "$MAIN_SAVED.tmp" "$MAIN_SAVED"
-  fi
-  apply '
-    .bar.layout |= with_entries(.value |= (
-      map(select(.id != $id))
-      | map(if .widgets then
-              .widgets |= map(select(.entry.id != $id))
-              | (if .order then .order |= map(select(. != $id)) else . end)
-            else . end)))' --arg id "$1"
-}
+def run(argv, **kwargs):
+    p = subprocess.run([str(a) for a in argv], capture_output=True, text=True, **kwargs)
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout).strip() or f'{argv[0]} failed ({p.returncode})')
+    return p.stdout.strip()
 
-layout_add() {  # layout_add <id> <section> [before-id]  (main bar)
-  local saved=""; [[ -f $MAIN_SAVED ]] && saved=$(jq -c --arg id "$1" '.[$id] // empty' "$MAIN_SAVED")
-  if [[ -n $saved ]]; then jq --arg id "$1" 'del(.[$id])' "$MAIN_SAVED" >"$MAIN_SAVED.tmp" && mv "$MAIN_SAVED.tmp" "$MAIN_SAVED"; fi
-  apply '
-    (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
-    | .bar.layout[$s] = (((.bar.layout[$s] // []) | map(select(.id != $id))) as $rest
-        | ($rest | map(.id) | index($before)) as $i
-        | ($entry // {id: $id}) as $e
-        | if $before != "" and $i != null then ($rest[:$i] + [$e] + $rest[$i:]) else ($rest + [$e]) end)' --arg id "$1" --arg s "$2" --arg before "${3:-}" --argjson entry "${saved:-null}"
-}
 
-on_bar() {  # on_bar <id> -> 0 if on bar (top-level or tray-hosted)
-  jq -e --arg id "$1" '[.bar.layout[][] | ., (.widgets? // [] | .[] | .entry)] | any(.id == $id)' "$CFG" >/dev/null && return 0
-  [[ -n $(extra_find "$1") ]]
-}
+def catalog():
+    return json.loads(run(['omarchy-plugin-catalog']))
 
-cmd_hide() {
-  local id="$1" where
-  where=$(jq -c --arg id "$1" '
-    .bar.layout as $l
-    | ([$l | to_entries[] | .key as $s | .value | to_entries[] | select(.value.id == $id) | {section: $s, index: .key}] | first) as $top
-    | ([$l[][] | select(.widgets) | select(any(.widgets[]; .entry.id == $id)) | .id] | first) as $tray
-    | if $tray then {tray: $tray} elif $top then $top else null end' "$CFG")
-  if [[ $where == null ]]; then
-    where=$(extra_find "$id"); [[ -n $where ]] || { echo "$id is not on the bar"; return 0; }
-  fi
-  state_set "$id" "$where"
-  extra_remove "$id"
-  apply '
-    .bar.layout |= with_entries(.value |= (
-      map(select(.id != $id))
-      | map(if .widgets then
-              .widgets |= map(select(.entry.id != $id))
-              | (if .order then .order |= map(select(. != $id)) else . end)
-            else . end)))' --arg id "$id"
-  echo "Removed $id from bar (still installed)"
-}
 
-cmd_show() {
-  local id="$1" where tray
-  if on_bar "$id"; then echo "$id is already on the bar"; return 0; fi
-  where=$(state_get "$id")
-  tray=$(jq -r '.tray // empty' <<<"${where:-{\}}")
-  local xbar; xbar=$(jq -r '.bar // empty' <<<"${where:-{\}}")
-  if [[ -n $xbar ]]; then
-    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-    layout_strip "$id"
-    extra_add "$id" "$xbar" "$(jq -r '.section' <<<"$where")"
-  elif [[ -n $tray ]] && needs_service "$id"; then
-    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-    layout_add "$id" right
-  elif [[ -n $tray ]]; then
-    apply '
-      (if (.plugins // [] | any((.id? // .) == $id)) then . else .plugins = ((.plugins // []) + [{id: $id}]) end)
-      | .bar.layout |= with_entries(.value |= map(
-          if .id == $tray then .widgets = ((.widgets // []) + [{entry: {id: $id}}]) else . end))' \
-      --arg id "$id" --arg tray "$tray"
-  else
-    local sect; sect=$(jq -r '.section // empty' <<<"${where:-{\}}")
-    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-    layout_add "$id" "${sect:-right}"
-  fi
-  state_del "$id"
-  echo "Added $id to bar"
-}
+def snapshot():
+    cfg = read(CFG, {})
+    ids = [p['id'] for p in catalog() if 'bar-widget' in p.get('kinds', [])]
+    return {'schema': 1, 'bar': {k: cfg.get('bar', {}).get(k) for k in BAR_KEYS},
+            'extra': read(EXTRA, {'bars': []}), 'widgetIds': ids,
+            'plugins': [p for p in cfg.get('plugins', []) if (p.get('id') if isinstance(p, dict) else p) in ids],
+            'disabled': [p for p in cfg.get('disabledPlugins', []) if p in ids],
+            'memory': {name: read(STATE / name, {}) for name in MEMORIES}}
 
-extra_has() { [[ -f $EXTRA ]] && jq -e --arg p "$1" 'any(.bars[]?; .position == $p)' "$EXTRA" >/dev/null; }
-main_pos() { jq -r '.bar.position // "top"' "$CFG"; }
 
-BARS_SAVED="${XDG_STATE_HOME:-$HOME/.local/state}/barctl-removed-bars.json"
+def save_record(folder, name, value):
+    ident = uuid.uuid4().hex
+    write(DATA / folder / (ident + '.json'), {'id': ident, 'name': name, 'time': time.time(), 'layout': value})
+    return ident
 
-cmd_togglebar() {  # add an extra bar on an edge, or remove it. A removed bar's widgets are remembered and come back when the bar is re-added.
-  local pos="$1" tmp saved; tmp=$(mktemp)
-  case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
-  [[ $pos != "$(main_pos)" ]] || { echo "$pos is the main bar"; return 0; }
-  [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  mkdir -p "$(dirname "$BARS_SAVED")"; [[ -f $BARS_SAVED ]] || echo '{}' >"$BARS_SAVED"
-  if extra_has "$pos"; then
-    # remember its widgets (only if there are any), then drop the bar
-    jq --arg p "$pos" --slurpfile x "$EXTRA" '
-      ($x[0].bars[]? | select(.position == $p)) as $b
-      | if (($b.left + $b.center + $b.right) | length) > 0 then .[$p] = ($b | del(.position)) else . end' "$BARS_SAVED" >"$tmp" && mv "$tmp" "$BARS_SAVED"
-    tmp=$(mktemp)
-    jq --arg p "$pos" '.bars |= map(select(.position != $p))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-    echo "Removed the $pos bar (its widgets are remembered)"
-  else
-    saved=$(jq -c --arg p "$pos" '.[$p] // empty' "$BARS_SAVED")
-    jq --arg p "$pos" --argjson s "${saved:-null}" '
-      .bars = ((.bars // []) + [ {position: $p, left: [], center: [], right: []} + ($s // {}) ])' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-    if [[ -n $saved ]]; then
-      tmp=$(mktemp); jq --arg p "$pos" 'del(.[$p])' "$BARS_SAVED" >"$tmp" && mv "$tmp" "$BARS_SAVED"
-      echo "Added a $pos bar with its remembered widgets"
-    else
-      echo "Added a $pos bar"
-    fi
-  fi
-}
 
-cmd_mainpos() {  # move the main bar to an edge; a bar already there swaps to the main bar's old edge (nobody loses widgets)
-  local pos="$1" old tmp; old=$(main_pos); tmp=$(mktemp)
-  [[ $pos != "$old" ]] || return 0
-  if extra_has "$pos"; then
-    jq --arg p "$pos" --arg o "$old" '.bars |= map(if .position == $p then .position = $o else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-  fi
-  omarchy-bar position "$pos"
-}
+def records(folder):
+    directory = DATA / folder
+    return sorted([read(p) for p in directory.glob('*.json')], key=lambda r: r['time'], reverse=True)
 
-cmd_swapbars() {  # swap any two bars (main or extra) by their edges: barctl swapbars <edge> <edge>
-  local a="$1" b="$2" tmp; tmp=$(mktemp)
-  for e in "$a" "$b"; do case "$e" in top|bottom|left|right) ;; *) echo "edges must be top, bottom, left or right" >&2; exit 1 ;; esac; done
-  [[ $a != "$b" ]] || return 0
-  local main; main=$(main_pos)
-  if [[ $a == "$main" ]]; then cmd_mainpos "$b"; return; fi
-  if [[ $b == "$main" ]]; then cmd_mainpos "$a"; return; fi
-  extra_has "$a" || extra_has "$b" || { echo "neither edge has a bar"; return 0; }
-  jq --arg a "$a" --arg b "$b" '.bars |= map(if .position == $a then .position = $b elif .position == $b then .position = $a else . end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-  echo "Swapped the $a and $b bars"
-}
 
-TRAY_PLUGIN="io.github.tyrichards.tray"
+def checkpoint(label, value):
+    ident = save_record('history', label, value)
+    for entry in records('history')[30:]:
+        (DATA / 'history' / (entry['id'] + '.json')).unlink()
+    return ident
 
-on_main() {  # on_main <id>: on the main bar (directly or inside its tray)?
-  jq -e --arg id "$1" '[.bar.layout[][] | ., (.widgets? // [] | .[] | .entry)] | any(.id == $id)' "$CFG" >/dev/null
-}
 
-extra_remove_from() {  # extra_remove_from <edge> <id>: take it off one extra bar only
-  [[ -f $EXTRA ]] || return 0
-  local tmp; tmp=$(mktemp)
-  jq --arg id "$2" --arg p "$1" 'def eid: if type == "object" then (.id // "") else . end;
-    def count: ((.left // []) + (.center // []) + (.right // [])) | length;
-    .bars |= map(if .position != $p then . else
-      count as $before
-      | (.left, .center, .right) |= (if . then map(select(eid != $id) | if type == "object" and .widgets then .widgets |= map(select(. != $id)) else . end) else . end)
-      | if $before > 0 and count == 0 then empty else . end end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-}
+def entry_id(e):
+    return e.get('id', '') if isinstance(e, dict) else e
 
-cmd_toggle() {  # cmd_toggle <id> <edge> [section]: put it on that bar if it is not there, take it off if it is; other bars are left alone
-  local id="$1" edge="$2" sect="${3:-right}"
-  case "$edge" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
-  case "$sect" in top) sect=left ;; middle) sect=center ;; bottom) sect=right ;; esac
-  local main; main=$(main_pos)
-  if [[ $id == "$TRAY_PLUGIN" && $edge != "$main" ]]; then
-    # the Tray plugin only works on the main bar; on other bars a tray is one of our own drawers
-    local existing=""
-    [[ -f $EXTRA ]] && existing=$(jq -r --arg p "$edge" '[.bars[]? | select(.position == $p) | (.left, .center, .right)[]? | select(type == "object" and ((.id // "") | startswith("tray:"))) | .id] | first // empty' "$EXTRA")
-    if [[ -n $existing ]]; then cmd_rmtray "$existing"; else cmd_addtray "$edge" "$sect"; fi
-    return
-  fi
-  if [[ $edge == "$main" ]]; then
-    if on_main "$id"; then layout_strip "$id"; echo "Took $id off the $edge bar"
-    else omarchy-shell shell setPluginEnabled "$id" true >/dev/null; layout_add "$id" "$sect"; echo "Put $id on the $edge bar"; fi
-  else
-    if [[ -n $(extra_find_on "$edge" "$id") ]]; then extra_remove_from "$edge" "$id"; echo "Took $id off the $edge bar"
-    else
-      local had_main=0; on_main "$id" && had_main=1
-      omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-      [[ $had_main == 1 ]] || layout_strip "$id"   # enabling drops it on the main bar by default
-      extra_add "$id" "$edge" "$sect"; echo "Put $id on the $edge bar"
-    fi
-  fi
-  state_del "$id"
-}
 
-extra_find_on() {  # extra_find_on <edge> <id>: non-empty if the id is on that extra bar
-  [[ -f $EXTRA ]] || return 0
-  jq -r --arg p "$2" --arg id "$1" 'def eid: if type == "object" then (.id // "") else . end;
-    [.bars[]? | select(.position == $id) | (.left, .center, .right)[]? | select(eid == $p or (type == "object" and ((.widgets // []) | index($p)) != null))] | first // empty | tostring' "$EXTRA" 2>/dev/null
-}
+def apply_snapshot(s):
+    if s.get('schema') != 1 or not isinstance(s.get('extra', {}).get('bars'), list):
+        raise RuntimeError('Unsupported or invalid layout snapshot')
+    cfg = read(CFG, {})
+    available = {p['id'] for p in catalog()}
+    skipped = set()
 
-cmd_setsection() {  # cmd_setsection <id> <section>: move it to that section on every bar it sits on directly (not inside a tray)
-  local id="$1" sect="$2" tmp; tmp=$(mktemp)
-  case "$sect" in top) sect=left ;; middle) sect=center ;; bottom) sect=right ;; esac
-  case "$sect" in left|center|right) ;; *) echo "section must be left, center or right" >&2; exit 1 ;; esac
-  # main bar
-  apply '
-    (.bar.layout | [.[][] | .id] | index($id)) as $there
-    | if $there == null then . else
-        .bar.layout |= with_entries(.value |= map(select(.id != $id)))
-        | .bar.layout[$s] = ((.bar.layout[$s] // []) + [{id: $id}]) end' --arg id "$id" --arg s "$sect"
-  # extra bars
-  if [[ -f $EXTRA ]]; then
-    jq --arg id "$id" --arg s "$sect" 'def eid: if type == "object" then (.id // "") else . end;
-      .bars |= map(
-        (.left // []) as $l | (.center // []) as $c | (.right // []) as $r
-        | if ([($l + $c + $r)[] | eid] | index($id)) == null then .
-          else (([($l + $c + $r)[] | select(eid == $id)] | first) as $entry
-            | .left = ($l | map(select(eid != $id))) | .center = ($c | map(select(eid != $id))) | .right = ($r | map(select(eid != $id)))
-            | .[$s] = (.[$s] + [$entry])) end)' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-  fi
-  echo "Moved $id to the $sect section"
-}
+    def entries(values):
+        result = []
+        for e in values or []:
+            ident = entry_id(e)
+            if ident.startswith('tray:') or ident in available:
+                if isinstance(e, dict) and 'widgets' in e:
+                    e = dict(e)
+                    e['widgets'] = [w for w in e['widgets'] if entry_id(w.get('entry', w) if isinstance(w, dict) else w) in available]
+                result.append(e)
+            else:
+                skipped.add(ident)
+        return result
 
-cmd_place() {  # cmd_place <id> <top|bottom|left|right> [section] [before-id]
-  local id="$1" pos="${2:-}" sect="${3:-right}" before="${4:-}"
-  [[ $before != "$id" ]] || before=""
-  case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
-  # side bars read top to bottom: top = start (left), middle = center, bottom = end (right)
-  case "$sect" in top) sect=left ;; middle) sect=center ;; bottom) sect=right ;; esac
-  case "$sect" in left|center|right) ;; *) echo "section must be left, center, right (or top, middle, bottom on a side bar)" >&2; exit 1 ;; esac
-  # enabling puts a plugin on the main bar by default, so enable first, then take it off everywhere and add it where asked
-  if [[ $id == tray:* && $pos == "$(main_pos)" ]]; then echo "the main bar uses the Tray plugin; put trays on an extra bar" >&2; exit 1; fi
-  local entry=""; [[ $id == tray:* ]] && entry=$(extra_entry "$id")
-  [[ $id == tray:* ]] || omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-  [[ $id == tray:* ]] || layout_strip "$id"
-  extra_remove "$id"
-  if [[ $id == tray:* ]]; then
-    extra_add_obj "${entry:-{\"id\":\"$id\",\"widgets\":[]\}}" "$pos" "$sect" "$before"
-  elif [[ $pos == "$(main_pos)" ]]; then layout_add "$id" "$sect" "$before"
-  else extra_add "$id" "$pos" "$sect" "$before"; fi
-  state_del "$id"
-  echo "Moved $id to $pos bar ($sect)"
-}
+    bar = cfg.setdefault('bar', {})
+    for key, value in s['bar'].items():
+        if value is None:
+            bar.pop(key, None)
+        elif key == 'layout':
+            bar[key] = {section: entries(value.get(section, [])) for section in ('left', 'center', 'right')}
+        else:
+            bar[key] = value
+    # Keep the manager reachable, using its current full entry when possible.
+    manager = 's3pp3ku.bar-manager'
+    if manager not in [entry_id(e) for lane in bar.get('layout', {}).values() for e in lane]:
+        bar.setdefault('layout', {}).setdefault('right', []).append({'id': manager})
+    widget_ids = set(s['widgetIds'])
+    cfg['plugins'] = [p for p in cfg.get('plugins', []) if entry_id(p) not in widget_ids] + [p for p in s['plugins'] if entry_id(p) in available]
+    cfg['disabledPlugins'] = [p for p in cfg.get('disabledPlugins', []) if p not in widget_ids] + [p for p in s['disabled'] if p in available and p != manager]
+    extra = json.loads(json.dumps(s['extra']))
+    for b in extra['bars']:
+        for section in ('left', 'center', 'right'):
+            b[section] = entries(b.get(section, []))
+    # Validate all data before writing either configuration.
+    write(EXTRA, extra)
+    for name in MEMORIES:
+        write(STATE / name, s['memory'].get(name, {}))
+    write(CFG, cfg)
+    return skipped
 
-cmd_addtray() {  # cmd_addtray <edge> [section]: a new empty tray on an extra bar
-  local pos="$1" sect="${2:-right}" n=1 name
-  if [[ $pos == auto ]]; then   # the first extra bar, else the first edge that is not the main bar
-    pos=$([[ -f $EXTRA ]] && jq -r '.bars[0].position // empty' "$EXTRA")
-    if [[ -z $pos ]]; then for e in bottom top left right; do [[ $e != "$(main_pos)" ]] && { pos=$e; break; }; done; fi
-  fi
-  case "$pos" in top|bottom|left|right) ;; *) echo "bar must be top, bottom, left or right" >&2; exit 1 ;; esac
-  [[ $pos != "$(main_pos)" ]] || { echo "the main bar uses the Tray plugin; put trays on an extra bar" >&2; exit 1; }
-  [[ -f $EXTRA ]] || echo '{"bars":[]}' >"$EXTRA"
-  while [[ -n $(extra_entry "tray:t$n") ]]; do n=$((n+1)); done
-  name="tray:t$n"
-  extra_add_obj "{\"id\":\"$name\",\"widgets\":[]}" "$pos" "$sect"
-  echo "Added $name to the $pos bar ($sect)"
-}
 
-cmd_rmtray() {  # cmd_rmtray <tray-id>: remove a tray; its widgets stay on the bar, in the tray's place
-  local id="$1" tmp; tmp=$(mktemp)
-  [[ -n $(extra_entry "$id") ]] || { echo "no such tray: $id" >&2; exit 1; }
-  jq --arg id "$id" 'def eid: if type == "object" then (.id // "") else . end;
-    .bars |= map((.left, .center, .right) |= (if . then map(if eid == $id then ((.widgets // [])[]) else . end) else . end))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-  echo "Removed $id (its widgets stay on the bar)"
-}
+def core(args):
+    p = subprocess.run([str(CORE)] + args, capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout).strip() or 'Bar action failed')
+    output = p.stdout.strip()
+    if output in ('unknown', 'false', 'unknown plugin') or 'Function not found' in output or 'Target not found' in output:
+        raise RuntimeError(output)
+    return output
 
-cmd_intray() {  # cmd_intray <widget-id> <tray-id>: move a widget into a tray
-  local w="$1" t="$2" tmp; tmp=$(mktemp)
-  if [[ $t == "$TRAY_PLUGIN" ]]; then   # the real Tray plugin on the main bar: its widget list lives in shell.json
-    [[ $w != tray:* && $w != "$TRAY_PLUGIN" ]] || { echo "a tray can't go inside a tray" >&2; exit 1; }
-    on_main "$TRAY_PLUGIN" || { echo "the Tray plugin is not on the main bar" >&2; exit 1; }
-    omarchy-shell shell setPluginEnabled "$w" true >/dev/null
-    layout_strip "$w"
-    extra_remove "$w"
-    apply '
-      .bar.layout |= with_entries(.value |= map(
-        if .id == $t then
-          .widgets = (((.widgets // []) | map(select(.entry.id != $w))) + [{entry: {id: $w}}])
-          | (if .order then .order = (((.order // []) | map(select(. != $w))) + [$w]) else . end)
-        else . end))' --arg w "$w" --arg t "$t"
-    state_del "$w"
-    echo "Put $w in the main Tray"
-    return
-  fi
-  [[ -n $(extra_entry "$t") ]] || { echo "no such tray: $t" >&2; exit 1; }
-  [[ $w != tray:* ]] || { echo "a tray can't go inside a tray" >&2; exit 1; }
-  omarchy-shell shell setPluginEnabled "$w" true >/dev/null
-  layout_strip "$w"
-  extra_remove "$w"
-  jq --arg w "$w" --arg t "$t" 'def eid: if type == "object" then (.id // "") else . end;
-    .bars |= map((.left, .center, .right) |= (if . then map(if eid == $t then .widgets = (((.widgets // []) | map(select(. != $w))) + [$w]) else . end) else . end))' "$EXTRA" >"$tmp" && mv "$tmp" "$EXTRA"
-  state_del "$w"
-  echo "Put $w in $t"
-}
 
-cmd_layout() {  # JSON picture of every bar for the Layout screen
-  local cat icons; cat=$(omarchy-plugin-catalog); icons=$("$(dirname "${BASH_SOURCE[0]}")/barctl-icons" 2>/dev/null || echo '{}')
-  [[ -n $icons ]] || icons='{}'
-  jq -n --argjson cat "$cat" --argjson icons "$icons" --arg main "$(main_pos)" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
-    ($cat | map({key: .id, value: (.name // .id)}) | from_entries) as $names
-    | def nm($id): ($names[$id] // $id);
-    def ic($id): ($icons[$id] // "");
-    def mainEntry: {id, name: nm(.id), icon: ic(.id), tray: (.widgets != null),
-                    members: ((.widgets // []) | map({id: .entry.id, name: nm(.entry.id), icon: ic(.entry.id)}))};
-    def extraEntry:
-      if type == "object"
-      then {id: .id, name: (if (.id | startswith("tray:")) then "Tray " + (.id | ltrimstr("tray:")) else nm(.id) end), icon: ic(.id),
-            tray: ((.id | startswith("tray:"))), members: ((.widgets // []) | map({id: ., name: nm(.), icon: ic(.)}))}
-      else {id: ., name: nm(.), icon: ic(.), tray: false, members: []} end;
-    def secs(f): {left: ((.left // []) | map(f)), center: ((.center // []) | map(f)), right: ((.right // []) | map(f))};
-    {main: $main,
-     bars: (["top","bottom","left","right"] | map(. as $e |
-        {key: $e, value:
-          (if $e == $main then {exists: true, main: true, sections: ($c[0].bar.layout | secs(mainEntry))}
-           else (($x[0].bars // []) | map(select(.position == $e)) | first) as $b
-             | if $b then {exists: true, main: false, sections: ($b | secs(extraEntry))}
-               else {exists: false, main: false, sections: {left: [], center: [], right: []}} end end)}) | from_entries)}'
-}
+def reorder(ident, edge, section, direction, tray=""):
+    def sequence(container):
+        seq = container[section]
+        if tray:
+            seq = next(e for e in seq if entry_id(e) == tray)["widgets"]
+        return seq
+    cfg = read(CFG, {})
+    main = cfg.get('bar', {}).get('position', 'top')
+    if edge == main:
+        seq = sequence(cfg['bar']['layout'])
+    else:
+        extra = read(EXTRA, {'bars': []})
+        seq = sequence(next(b for b in extra['bars'] if b['position'] == edge))
+    i = next(i for i, e in enumerate(seq) if entry_id(e.get('entry', e) if isinstance(e, dict) else e) == ident)
+    j = max(0, min(len(seq) - 1, i + int(direction)))
+    if i == j:
+        return 'Already at the end of this section'
+    seq[i], seq[j] = seq[j], seq[i]
+    write(CFG if edge == main else EXTRA, cfg if edge == main else extra)
+    return f'Reordered {ident} on {edge}'
 
-cmd_list() {
-  local cat; cat=$(omarchy-plugin-catalog)
-  omarchy plugin list --json | jq --argjson cat "$cat" --arg main "$(main_pos)" --slurpfile c "$CFG" --slurpfile x <([[ -f $EXTRA ]] && cat "$EXTRA" || echo '{"bars":[]}') '
-    def eid: if type == "object" then (.id // "") else . end;
-    ($c[0].bar.layout // {}) as $l
-    | [ $l | to_entries[] | .key as $s | .value[] | {id, section: $s, bar: $main} ] as $top
-    | [ $l | to_entries[] | .value[] | .widgets? // [] | .[] | {id: .entry.id, section: "tray", bar: $main} ] as $tray
-    | [ $x[0].bars[]? | .position as $p | ("left","center","right") as $s | (.[$s] // [])[]
-        | . as $e
-        | if type == "object"
-          then ({id: .id, section: ($p + "/" + $s), bar: $p, isTray: true, members: (.widgets // [])},
-                ((.widgets // [])[] | {id: ., section: ($p + "/" + $s), bar: $p, tray: $e.id}))
-          else {id: ., section: ($p + "/" + $s), bar: $p} end ] as $extra
-    | ($top + $tray + $extra) as $onbar
-    | ($cat | map({key: .id, value: .}) | from_entries) as $meta
-    | ([ .[] | select(.kinds | index("bar-widget"))
-        | . as $x
-        | ($onbar | map(select(.id == $x.id and (.isTray | not)))) as $all
-        | ($all | first) as $b
-        | ($all | map(.bar)) as $edges
-        | (if $x.id == "io.github.tyrichards.tray" then [$extra[] | select(.isTray) | .bar] else [] end) as $trayEdges
-        | ($meta[$x.id] // {}) as $m
-        | { id, name, firstParty,
-            enabled: (.enabled or ($b != null)),
-            onBar: ($b != null or ($trayEdges | length) > 0), section: ($b.section // ""), bar: ($b.bar // ""), tray: ($b.tray // ""),
-            bars: (($edges + $trayEdges) | unique),
-            sections: ($all | map({key: .bar, value: (.section | split("/") | last)}) | from_entries),
-            needsService: (($m.kinds // []) | index("service") != null),
-            canManage: (.firstParty | not),
-            description: ($m.description // ""),
-            category: ($m.barWidget.category // ""),
-            aliases: ($m.barWidget.aliases // []) } ]
-      + [ $extra[] | select(.isTray) | { id, name: ("Tray " + (.id | ltrimstr("tray:")) + " (" + ((.members | length) | tostring) + ")"),
-            firstParty: false, enabled: true, onBar: true, section, bar, tray: "", isTray: true, members,
-            needsService: false, canManage: false,
-            description: "A drawer on an extra bar; widgets you put in it slide out from its chevron",
-            category: "Tray", aliases: ["tray", "drawer", "chevron", "group"] } ])
-    | sort_by(.name | ascii_downcase)'
-}
 
-id="${2:-}"
-case "${1:-}" in
-  list) cmd_list ;;
-  fix) apply '.' ; echo "Removed duplicate tray entries" ;;
-  enable)
-    omarchy-shell shell setPluginEnabled "$id" true >/dev/null
-    on_bar "$id" || cmd_show "$id" >/dev/null
-    echo "Enabled $id" ;;
-  disable)
-    cmd_hide "$id" >/dev/null
-    omarchy plugin disable "$id" ;;
-  update) if [[ $id == --all ]]; then omarchy plugin update --yes; else omarchy plugin update "$id" --yes; fi ;;
-  uninstall) cmd_hide "$id" >/dev/null || true; state_del "$id"; omarchy plugin remove "$id" --yes ;;
-  hide) cmd_hide "$id" ;;
-  togglebar) cmd_togglebar "$id" ;;
-  hasbar) extra_has "$id" ;;
-  hasedge) [[ $id == "$(main_pos)" ]] || extra_has "$id" ;;
-  mainpos) cmd_mainpos "$id" ;;
-  swapbars) cmd_swapbars "$id" "${3:-}" ;;
-  addtray) cmd_addtray "$id" "${3:-right}" ;;
-  rmtray) cmd_rmtray "$id" ;;
-  intray) cmd_intray "$id" "${3:-}" ;;
-  toggle) cmd_toggle "$id" "${3:-}" "${4:-right}" ;;
-  setsection) cmd_setsection "$id" "${3:-}" ;;
-  layout) cmd_layout ;;
-  place) cmd_place "$id" "${3:-}" "${4:-right}" "${5:-}" ;;
-  drop) cmd_place "$id" "${3:-}" "${4:-right}" "${5:-}" ;;
-  show) cmd_show "$id" ;;
-  *) echo "usage: barctl list|place|enable|disable|update|uninstall|hide|show|fix <id>" >&2; exit 1 ;;
-esac
+def move_section(ident, edge, section):
+    if section not in ('left', 'center', 'right'):
+        raise RuntimeError('Invalid section')
+    cfg = read(CFG, {})
+    main = cfg.get('bar', {}).get('position', 'top')
+    extra = read(EXTRA, {'bars': []})
+    container = cfg['bar']['layout'] if edge == main else next(b for b in extra['bars'] if b['position'] == edge)
+    found = None
+    for lane in ('left', 'center', 'right'):
+        for e in list(container.get(lane, [])):
+            if entry_id(e) == ident:
+                found = e
+                container[lane].remove(e)
+    if found is None:
+        raise RuntimeError('Select a widget directly on a bar to change its section')
+    container.setdefault(section, []).append(found)
+    write(CFG if edge == main else EXTRA, cfg if edge == main else extra)
+    return f'Moved {ident} to {edge}/{section}'
+
+
+def git(directory, *args):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_ALLOW_PROTOCOL='https:ssh:git:file', GIT_SSH_COMMAND='ssh -oBatchMode=yes')
+    return run(['git', '-c', 'core.fsmonitor=', '-c', 'core.hooksPath=/dev/null', '-C', directory, *args], env=env, timeout=45)
+
+
+def eligible(directory):
+    if directory.is_symlink():
+        raise RuntimeError('Linked plugin; skipped')
+    if not (directory / '.git').exists():
+        raise RuntimeError('Not a Git installation')
+    if git(directory, 'status', '--porcelain'):
+        raise RuntimeError('Local changes; skipped to preserve your edits')
+
+
+def check_updates(only):
+    reports = []
+    candidates = [PLUGINS / only] if only != '--all' else sorted(PLUGINS.iterdir())
+    for directory in candidates:
+        if not directory.is_dir() or directory.name.startswith('.'):
+            continue
+        if only == '--all' and not (directory / '.git').exists():
+            continue
+        report = {'id': directory.name, 'status': 'skipped', 'summary': '', 'token': ''}
+        try:
+            eligible(directory)
+            old = git(directory, 'rev-parse', 'HEAD')
+            branch = git(directory, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+            remote = git(directory, 'config', f'branch.{branch}.remote')
+            ref = git(directory, 'config', f'branch.{branch}.merge')
+            git(directory, 'fetch', '--quiet', '--no-recurse-submodules', remote, ref)
+            target = git(directory, 'rev-parse', 'FETCH_HEAD')
+            if old == target:
+                report.update(status='current', summary='Up to date')
+            else:
+                try:
+                    git(directory, 'merge-base', '--is-ancestor', old, target)
+                except RuntimeError:
+                    raise RuntimeError('Local and remote histories differ; skipped')
+                count = git(directory, 'rev-list', '--count', old + '..' + target)
+                summary = git(directory, 'log', '-12', '--format=%h %s', old + '..' + target)
+                stat = git(directory, 'diff', '--shortstat', old, target)
+                token = uuid.uuid4().hex
+                write(DATA / 'updates' / (token + '.json'), {'id': directory.name, 'old': old, 'target': target})
+                report.update(status='available', summary=f'{count} new commits\n{summary}\n{stat}', token=token, commit=target[:10])
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            report['summary'] = str(e) or 'Update check failed'
+        reports.append(report)
+    return reports
+
+
+def update_apply(token):
+    if not re.fullmatch('[a-f0-9]{32}', token):
+        raise RuntimeError('Invalid update preview')
+    plan = read(DATA / 'updates' / (token + '.json'))
+    if not plan:
+        raise RuntimeError('Update preview has expired; check again')
+    directory = PLUGINS / plan['id']
+    eligible(directory)
+    if git(directory, 'rev-parse', 'HEAD') != plan['old']:
+        raise RuntimeError('Plugin changed since preview; check again')
+    git(directory, 'merge', '--ff-only', '--quiet', plan['target'])
+    try:
+        run(['omarchy-plugin-validate', directory])
+    except RuntimeError:
+        git(directory, 'reset', '--hard', plan['old'])
+        raise RuntimeError('Update failed validation and was rolled back')
+    (DATA / 'updates' / (token + '.json')).unlink()
+    run(['omarchy-shell', 'shell', 'rescanPlugins'])
+    return f"Updated {plan['id']} to {plan['target'][:10]}"
+
+
+def dispatch(args):
+    cmd = args[0]
+    if cmd == 'shortcut':
+        result = json.loads(run([sys.executable, str(CORE.parent / 'shortcut.py')] + args[1:]))
+        return result.get('message', 'Done')
+    if cmd == 'marketplace':
+        cache = DATA / 'marketplace.json'
+        try:
+            raw = run(['curl', '-fsSL', '--max-time', '30', '--max-filesize', '16777216', 'https://plugins.omarchy.org/catalog.json'])
+            document = json.loads(raw)
+            if not isinstance(document.get('plugins'), list):
+                raise RuntimeError('Invalid marketplace response')
+            write(cache, document)
+        except Exception:
+            document = read(cache, {})
+            if not document.get('plugins'):
+                raise
+        listings = []
+        for entry in document['plugins']:
+            if not isinstance(entry, dict): continue
+            url = entry.get('repo', '')
+            if not isinstance(url, str) or not url.startswith('https://'): continue
+            listing = {key: str(entry.get(key, ''))[:4000] for key in ('id','name','description','author','version','category','license','verificationStatus','verificationCoverage','installNote','previewImage')}
+            listing.update(repo=url, installAvailable=entry.get('installAvailable') is True,
+                           installed=(PLUGINS / listing['id'] / 'manifest.json').is_file())
+            image = listing['previewImage']
+            listing['previewImage'] = 'https://plugins.omarchy.org/' + image if image.startswith('assets/') else ''
+            listings.append(listing)
+        return json.dumps(sorted(listings, key=lambda e: e['name'].lower()))
+    if cmd == 'market-install':
+        ident, edge, section = args[1:4]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', ident) or '..' in ident:
+            raise RuntimeError('Invalid plugin ID')
+        if edge not in ('top','bottom','left','right') or section not in ('left','center','right'):
+            raise RuntimeError('Choose a valid bar and section')
+        document = read(DATA / 'marketplace.json', {})
+        matches = [e for e in document.get('plugins', []) if e.get('id') == ident]
+        if len(matches) != 1 or matches[0].get('installAvailable') is not True:
+            raise RuntimeError('This listing requires manual installation')
+        if (PLUGINS / ident).exists(): raise RuntimeError('Plugin is already installed')
+        url = matches[0].get('repo', '')
+        if not url.startswith('https://github.com/') or not re.fullmatch(r'https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?', url):
+            raise RuntimeError('Unsupported repository URL; use the Git URL installer')
+        checkpoint('Install ' + ident, snapshot())
+        output = run(['omarchy', 'plugin', 'add', url, '--enable', '--yes'])
+        if not (PLUGINS / ident / 'manifest.json').is_file():
+            raise RuntimeError('Installed repository uses a different plugin ID. Refresh to place it.')
+        manifest = read(PLUGINS / ident / 'manifest.json', {})
+        if 'bar-widget' in manifest.get('kinds', []):
+            core(['place', ident, edge, section])
+        return output + '\nInstalled ' + ident
+    if cmd == 'ui-get':
+        return json.dumps(read(DATA / 'ui.json', {}))
+    if cmd == 'ui-save':
+        write(DATA / 'ui.json', json.loads(args[1])); return ''
+    if cmd == 'snapshots':
+        return json.dumps([{k: v for k, v in r.items() if k != 'layout'} | {'kind': folder} for folder in ('saved', 'history') for r in records(folder)])
+    if cmd == 'save-layout':
+        name = args[1].strip() if len(args) > 1 else 'My layout'
+        if not name:
+            raise RuntimeError('Enter a name for this layout')
+        save_record('saved', name[:120], snapshot()); return 'Saved layout: ' + name
+    if cmd in ('restore-layout', 'undo'):
+        if cmd == 'undo':
+            history = records('history')
+            if not history:
+                raise RuntimeError('Nothing to undo')
+            record = history[0]
+            apply_snapshot(record['layout'])
+            (DATA / 'history' / (record['id'] + '.json')).unlink()
+            return 'Undid: ' + record['name']
+        folder, ident = args[1:3]
+        if folder not in ('history', 'saved') or not re.fullmatch('[a-f0-9]{32}', ident):
+            raise RuntimeError('Invalid layout selection')
+        record = read(DATA / folder / (ident + '.json'))
+        if not record:
+            raise RuntimeError('Layout no longer exists')
+        checkpoint('Restore ' + record['name'], snapshot())
+        missing = apply_snapshot(record['layout'])
+        return 'Restored ' + record['name'] + (f'; skipped {len(missing)} uninstalled plugins' if missing else '')
+    if cmd == 'check-updates':
+        only = args[1] if len(args) > 1 else '--all'
+        if only != '--all' and not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]*', only):
+            raise RuntimeError('Invalid plugin id')
+        return json.dumps(check_updates(only))
+    if cmd == 'apply-update':
+        return update_apply(args[1])
+    if cmd == 'add-plugin':
+        url = args[1].strip()
+        if not url.startswith(('https://', 'ssh://', 'git@')):
+            raise RuntimeError('Enter an HTTPS or SSH Git URL')
+        checkpoint('Install plugin', snapshot())
+        return run(['omarchy', 'plugin', 'add', url, '--enable', '--yes'])
+    if cmd == 'update':
+        raise RuntimeError('Use check-updates, review the preview, then apply-update <token>')
+    if cmd in MUTATIONS:
+        before = snapshot()
+        history_id = checkpoint(' '.join(args), before)
+        try:
+            output = reorder(*args[1:]) if cmd == 'reorder' else move_section(*args[1:]) if cmd == 'move-section' else core(args)
+        except Exception:
+            if snapshot() == before:
+                (DATA / 'history' / (history_id + '.json')).unlink()
+            raise
+        after = snapshot()
+        if after == before:
+            (DATA / 'history' / (history_id + '.json')).unlink()
+        return output
+    return core(args)
+
+
+if __name__ == '__main__':
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        with (DATA / 'lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            print(dispatch(sys.argv[1:]))
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

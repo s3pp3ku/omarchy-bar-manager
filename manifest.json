@@ -2,22 +2,39 @@
   "schemaVersion": 1,
   "id": "s3pp3ku.bar-manager",
   "name": "Bar Manager",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "author": "s3pp3ku",
   "license": "MIT",
-  "description": "Enable, disable, update, uninstall, and show/hide bar plugins from one panel.",
-  "kinds": ["panel", "bar-widget"],
-  "entryPoints": { "panel": "Panel.qml", "barWidget": "BarWidget.qml" },
+  "description": "Manage every bar and tray, save layouts, undo changes, and preview plugin updates.",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "panel": "Panel.qml",
+    "barWidget": "BarWidget.qml"
+  },
   "barWidget": {
     "displayName": "Bar Manager",
     "description": "Opens the bar manager panel",
     "category": "Utilities",
-    "aliases": ["bar-manager", "barctl"],
+    "aliases": [
+      "bar-manager",
+      "barctl"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
-    "defaults": { "icon": "" },
+    "defaults": {
+      "icon": "\uf1de"
+    },
     "schema": [
-      { "key": "icon", "type": "string", "label": "Bar icon", "description": "Text or glyph painted on the bar.", "defaultValue": "" }
+      {
+        "key": "icon",
+        "type": "string",
+        "label": "Bar icon",
+        "description": "Text or glyph painted on the bar.",
+        "defaultValue": "\uf1de"
+      }
     ]
   }
 }
