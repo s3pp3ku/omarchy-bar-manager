@@ -45,7 +45,16 @@ Item {
         for (var i = 0; i < edges.length && !pick; i++) if (edges[i] !== layoutData.main && edgeHasBar(edges[i])) pick = edges[i]
         for (var j = 0; j < edges.length && !pick; j++) if (edges[j] !== layoutData.main) pick = edges[j]
         trayEdge = pick
+        addingBar = false
         addingTray = true
+    }
+    property bool addingBar: false
+    property string barEdge: ""
+    readonly property var freeEdges: ["bottom", "left", "right", "top"].filter(function(e) { return !root.edgeHasBar(e) })
+    function openAddBar() {
+        if (freeEdges.indexOf(barEdge) < 0) barEdge = freeEdges.length ? freeEdges[0] : ""
+        addingTray = false
+        addingBar = true
     }
     function itemName(id) {
         for (var i = 0; i < items.length; i++) if (items[i].id === id) return items[i].name
@@ -712,6 +721,8 @@ Item {
                     Row {
                         Layout.alignment: Qt.AlignTop
                         spacing: 6
+                        HeaderBtn { label: "+ Bar"; picked: root.addingBar; tip: "Add a new bar on an empty screen edge"
+                                    onClicked: root.addingBar ? root.addingBar = false : root.openAddBar() }
                         HeaderBtn { label: "+ Tray"; picked: root.addingTray; tip: "Choose a bar and section for a new empty tray (a chevron drawer)"
                                     onClicked: root.addingTray ? root.addingTray = false : root.openAddTray() }
                         HeaderBtn { label: "Undo"; tip: "Undo the last bar layout change (Ctrl+Z)"; onClicked: root.act(["undo"], "Undoing") }
@@ -719,6 +730,63 @@ Item {
                     }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.outlineSoft }
+
+                // Add-bar form: only empty edges can be picked (togglebar would remove an existing bar)
+                Rectangle {
+                    visible: root.addingBar
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: addBarBody.implicitHeight + 28
+                    radius: Style.cornerRadius
+                    color: root.surface
+                    border.color: root.accent2; border.width: 2
+                    ColumnLayout {
+                        id: addBarBody
+                        x: 16; y: 14; width: parent.width - 32
+                        spacing: 12
+                        Text { text: "New bar"; color: root.accent2Text; font.family: root.mono; font.pixelSize: 15; font.bold: true }
+                        Labeled {
+                            title: "Edge"
+                            SegGroup {
+                                Repeater {
+                                    model: [{ k: "top", t: "Top" }, { k: "bottom", t: "Bottom" }, { k: "left", t: "Left" }, { k: "right", t: "Right" }]
+                                    SegBtn {
+                                        required property var modelData
+                                        readonly property bool taken: root.edgeHasBar(modelData.k)
+                                        enabled: !taken
+                                        label: modelData.t + (modelData.k === root.layoutData.main ? " (main)" : taken ? " (has a bar)" : "")
+                                        picked: !taken && root.barEdge === modelData.k
+                                        onClicked: root.barEdge = modelData.k
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Text {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: !root.barEdge
+                                      ? "Every edge of the screen already has a bar, so there's nowhere to add one."
+                                      : "Adds an empty bar along the " + root.barEdge + " edge of the screen."
+                                        + "  If you had a " + root.barEdge + " bar before and removed it, its widgets come back with it."
+                                        + "  Then fill it from the List (Bars buttons) or by dragging on the Layout screen."
+                                color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
+                            }
+                            Btn {
+                                visible: root.barEdge !== ""
+                                picked: true
+                                bold: true
+                                label: "Add " + root.barEdge + " bar"
+                                onClicked: {
+                                    if (!root.edgeHasBar(root.barEdge)) root.act(["togglebar", root.barEdge], "Adding the " + root.barEdge + " bar")
+                                    root.addingBar = false
+                                }
+                            }
+                            Btn { label: root.barEdge ? "Cancel" : "Close"; onClicked: root.addingBar = false }
+                        }
+                    }
+                }
 
                 // Add-tray form: pick where the new tray goes before creating it
                 Rectangle {

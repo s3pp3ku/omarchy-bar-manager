@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "s3pp3ku.bar-manager",
   "name": "Bar Manager",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "s3pp3ku",
   "license": "MIT",
   "description": "Manage every bar and tray, save layouts, undo changes, and preview plugin updates.",
