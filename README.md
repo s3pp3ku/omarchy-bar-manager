@@ -164,7 +164,7 @@ These additions were informed by [Omaseiton](https://github.com/p-clements/omase
 
 The Marketplace tab browses the catalog with search, installed/available/verified filters, screenshots, license and verification metadata, source links and a two-click install review. Choose destination bar and section before installing. Current repository versions are installed; registry verification can refer to an older commit. Manual-setup listings are viewable but not installed automatically. Catalog results are cached for offline use.
 
-Keys assigns plugin launch shortcuts, checks live Hyprland conflicts, and preserves existing keybindings. Saved bindings have Bar Manager ownership markers; reload errors restore the previous file. Omaplug-owned bindings stay under Omaplug management.
+Keys assigns plugin launch shortcuts, checks live Hyprland conflicts, and preserves existing keybindings. The plugin dropdown shows each plugin's current shortcut beside its name (Omarchy's defaults, your own bindings and Bar Manager's), picking one fills in its combination, and a list below shows every plugin that already has a shortcut; click one to select it. A clone shows its original's shortcut, since the shell routes the built-in id to the enabled clone. `bin/shortcut.py list` prints the same map as JSON. `omarchy-shell shell toggle s3pp3ku.bar-manager '{"view":"shortcuts"}'` opens straight into Keys. Saved bindings have Bar Manager ownership markers; reload errors restore the previous file. Omaplug-owned bindings stay under Omaplug management.
 
 ## Readable on every theme
 
@@ -177,6 +177,8 @@ Bar Manager reads your theme's whole palette (`colors.toml`, in either the `red`
 Every text and border color is pushed toward black or white until it clears a minimum contrast with the background (main text 7:1, secondary text 4.6:1, borders and accents 3:1). Checked against all 22 stock Omarchy themes, including OLED black ones (Vantablack, Hackerman) and light ones (White, Flexoki Light, Catppuccin Latte). Colors update when you change theme.
 
 The Marketplace uses the same outlined cards, button groups and filled primary **Install** button as the List.
+
+**Marketplace sorting and artwork.** Sort by **Installs** (the default), **Stars**, **Newest**, **Updated** or **A–Z**. Install counts are how many times a plugin's install command was copied on [plugins.omarchy.org](https://plugins.omarchy.org); Bar Manager reads the site's public counts (`api.omarchyplugins.com/v1/stats`, cached for offline use) and never sends anything back. Each card shows the plugin's thumbnail (or its initials when it has none), installs, GitHub stars and the date it was added. Click a thumbnail or the large preview to open the plugin's page on plugins.omarchy.org; **Plugin page ↗** and **Source ↗** in the details pane do the same for the website and the repository.
 
 Narrow windows: tabs wrap, the Bars/Position/Tray groups wrap under each plugin's name, and marketplace details open with a Back to plugins button.
 

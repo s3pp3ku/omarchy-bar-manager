@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 
 HOME = Path.home()
@@ -276,6 +277,21 @@ def dispatch(args):
             document = read(cache, {})
             if not document.get('plugins'):
                 raise
+        # Read-only popularity counts the marketplace site shows (views, install-command copies, hearts). Optional.
+        stats_cache = DATA / 'marketplace-stats.json'
+        try:
+            stats = json.loads(run(['curl', '-fsSL', '--max-time', '15', '--max-filesize', '4194304',
+                                    '-H', 'Accept: application/json', 'https://api.omarchyplugins.com/v1/stats']))
+            if not isinstance(stats.get('plugins'), dict):
+                raise RuntimeError('Invalid stats response')
+            write(stats_cache, stats)
+        except Exception:
+            stats = read(stats_cache, {})
+        counts = stats.get('plugins') if isinstance(stats.get('plugins'), dict) else {}
+
+        def count(value):
+            return value if isinstance(value, int) and value >= 0 else 0
+
         listings = []
         for entry in document['plugins']:
             if not isinstance(entry, dict): continue
@@ -284,6 +300,19 @@ def dispatch(args):
             listing = {key: str(entry.get(key, ''))[:4000] for key in ('id','name','description','author','version','category','license','verificationStatus','verificationCoverage','installNote','previewImage')}
             listing.update(repo=url, installAvailable=entry.get('installAvailable') is True,
                            installed=(PLUGINS / listing['id'] / 'manifest.json').is_file())
+            stars = entry.get('stars')
+            listing['stars'] = stars if isinstance(stars, int) and stars >= 0 else 0
+            for key, source in (('addedAt', entry.get('listedAt') or entry.get('addedAt')), ('updatedAt', entry.get('repositoryUpdatedAt'))):
+                listing[key] = source[:10] if isinstance(source, str) and re.match(r'\d{4}-\d{2}-\d{2}', source) else ''
+            thumb = entry.get('previewThumbnail')
+            listing['thumbnail'] = 'https://plugins.omarchy.org/' + thumb if isinstance(thumb, str) and thumb.startswith('assets/') else ''
+            initials = entry.get('initials')
+            listing['initials'] = initials[:3] if isinstance(initials, str) else listing['name'][:2].upper()
+            listing['webPage'] = 'https://plugins.omarchy.org/plugin.html?id=' + urllib.parse.quote(listing['id'], safe='')
+            plugin_counts = counts.get(listing['id']) if isinstance(counts.get(listing['id']), dict) else {}
+            listing['installs'] = count(plugin_counts.get('copies'))
+            listing['views'] = count(plugin_counts.get('views'))
+            listing['hearts'] = count(plugin_counts.get('hearts'))
             image = listing['previewImage']
             listing['previewImage'] = 'https://plugins.omarchy.org/' + image if image.startswith('assets/') else ''
             listings.append(listing)

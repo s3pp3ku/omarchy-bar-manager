@@ -181,7 +181,41 @@ def run(action, plugin, value=""):
     return {"shortcut": combo, "message": "Shortcut saved." if combo else "Shortcut removed."}
 
 
+BIND_RE = re.compile(r'o\.bind\(\s*"([^"]+)"\s*,\s*(?:nil|"([^"]*)")\s*,\s*"omarchy-shell(?:\s+-q)?\s+shell\s+(?:toggle|summon)\s+([A-Za-z0-9][A-Za-z0-9._-]*)"')
+UNBIND_RE = re.compile(r'hl\.unbind\(\s*"([^"]+)"\s*\)')
+
+
+def norm(combo):
+    return " + ".join(p.strip().upper() for p in combo.split("+"))
+
+
+def list_shortcuts():
+    """Every keybinding that opens a shell plugin: Omarchy defaults first, then the user's files, which win."""
+    default = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy") / "default/hypr"
+    files = sorted(default.rglob("*.lua")) + sorted((Path.home() / ".config/hypr").glob("*.lua"))
+    found = {}
+    for path in files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        user = not str(path).startswith(str(default))
+        for line in raw.splitlines():
+            line = line.split("--", 1)[0] if not line.lstrip().startswith("--") else ""
+            for combo in UNBIND_RE.findall(line):
+                for plugin in [p for p, v in found.items() if v["combo"] == norm(combo)]:
+                    del found[plugin]
+            for combo, description, plugin in BIND_RE.findall(line):
+                source = ("Bar Manager" if (description or "").startswith("Bar Manager:")
+                          else "your bindings" if user else "Omarchy default")
+                found[plugin] = {"combo": norm(combo), "source": source}
+    return {"shortcuts": found}
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["list"]:
+        print(json.dumps(list_shortcuts()))
+        sys.exit(0)
     try:
         if len(sys.argv) not in (3, 4):
             raise ValueError("Expected operation, plugin ID, and optional shortcut.")

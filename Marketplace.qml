@@ -12,6 +12,7 @@ Control {
     font.family: Style.font.family
     property string query: ""
     property string scope: "All"
+    property string sortBy: "Installs"
     property string confirmId: ""
     property bool showUrl: false
     property string edge: "bottom"
@@ -24,7 +25,21 @@ Control {
             && (page.scope !== "Installed" || p.installed)
             && (page.scope !== "Available" || !p.installed && p.installAvailable)
             && (page.scope !== "Verified" || p.verificationStatus === "verified")
+    }).sort(function(a, b) {
+        var byName = a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1
+        if (page.sortBy === "Installs") return (b.installs - a.installs) || (b.stars - a.stars) || byName
+        if (page.sortBy === "Stars") return (b.stars - a.stars) || byName
+        if (page.sortBy === "Newest") return a.addedAt === b.addedAt ? byName : (a.addedAt < b.addedAt ? 1 : -1)
+        if (page.sortBy === "Updated") return a.updatedAt === b.updatedAt ? byName : (a.updatedAt < b.updatedAt ? 1 : -1)
+        return byName
     })
+    function num(n) { return Number(n || 0).toLocaleString(Qt.locale(), "f", 0) }
+    function openPage(entry) { if (entry && entry.webPage) Qt.openUrlExternally(entry.webPage) }
+    function shortDate(iso) {
+        if (!iso) return ""
+        var d = new Date(iso + "T00:00:00")
+        return isNaN(d) ? iso : d.toLocaleDateString(Qt.locale(), "MMM d, yyyy")
+    }
     onSelectedChanged: confirmId = ""
     palette.window: manager.bg
     palette.base: manager.surface
@@ -73,9 +88,30 @@ Control {
                 current: page.scope
                 onChosen: function(v) { page.scope = v }
             }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 10
+            Text { text: "SORT"; color: manager.dim; font.family: Style.font.family; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
+            Seg {
+                options: ["Installs", "Stars", "Newest", "Updated", "A–Z"]
+                current: page.sortBy
+                onChosen: function(v) { page.sortBy = v; listing.positionViewAtBeginning() }
+            }
             Text {
-                Layout.minimumWidth: 80
-                horizontalAlignment: Text.AlignRight
+                Layout.leftMargin: 6
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+                text: ({ Installs: "most installed first", Stars: "most GitHub stars first", Newest: "newest in the catalog", Updated: "recently updated", "A–Z": "alphabetical" })[page.sortBy]
+                color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize
+                HoverHandler { id: sortHover }
+                PanelToolTip {
+                    visible: sortHover.hovered && page.sortBy === "Installs"
+                    text: "Installs = how many times the install command was copied on plugins.omarchy.org"
+                }
+            }
+            Text {
                 text: page.entries.length + (page.entries.length === 1 ? " result" : " results")
                 color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize
             }
@@ -106,16 +142,45 @@ Control {
                     required property var modelData
                     readonly property bool chosen: !!page.selected && page.selected.id === modelData.id
                     width: listing.width - 14
-                    height: summary.implicitHeight + 30
+                    height: Math.max(summary.implicitHeight, 72) + 30
                     radius: Style.cornerRadius
                     color: chosen ? manager.selectedSurface : (cardHover.hovered ? manager.hoverSurface : manager.surface)
                     border.color: chosen ? manager.accent : (cardHover.hovered ? manager.outline : manager.outlineSoft)
                     border.width: chosen ? 2 : 1
                     HoverHandler { id: cardHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: { manager.marketSelection = card.modelData; page.detailsOpen = true } }
+                    Rectangle {
+                        id: thumb
+                        x: 14; anchors.verticalCenter: parent.verticalCenter
+                        width: 128; height: 72
+                        radius: Style.cornerRadius
+                        color: manager.sunken
+                        border.color: thumbHover.hovered ? manager.accent : manager.outlineSoft
+                        border.width: thumbHover.hovered ? 2 : 1
+                        Image {
+                            id: thumbImage
+                            anchors.fill: parent; anchors.margins: 2
+                            source: card.modelData.thumbnail || ""
+                            asynchronous: true; cache: true
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 256; sourceSize.height: 144
+                            visible: status === Image.Ready
+                        }
+                        Text {
+                            visible: thumbImage.status !== Image.Ready
+                            anchors.centerIn: parent
+                            text: card.modelData.initials || "?"
+                            color: manager.accent2Text; font.family: Style.font.family; font.pixelSize: 22; font.bold: true
+                        }
+                        HoverHandler { id: thumbHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: page.openPage(card.modelData) }
+                        PanelToolTip { visible: thumbHover.hovered; text: "Open this plugin's page on plugins.omarchy.org" }
+                    }
                     ColumnLayout {
                         id: summary
-                        x: 16; y: 15; width: parent.width - 32
+                        anchors.left: thumb.right; anchors.leftMargin: 14
+                        anchors.right: parent.right; anchors.rightMargin: 16
+                        y: 15
                         spacing: 6
                         RowLayout {
                             Layout.fillWidth: true
@@ -126,7 +191,13 @@ Control {
                             Text { visible: !card.modelData.installed && !!card.modelData.version; text: card.modelData.version || ""; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
                         }
                         Text { Layout.fillWidth: true; text: card.modelData.description; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.bodySize; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight; lineHeight: 1.15 }
-                        Text { Layout.fillWidth: true; text: card.modelData.category + "   ·   " + card.modelData.author; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize; elide: Text.ElideRight }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "↓ " + page.num(card.modelData.installs) + "   ★ " + page.num(card.modelData.stars) + "   ·   " + card.modelData.category + "   ·   " + card.modelData.author
+                                  + (page.sortBy === "Updated" && card.modelData.updatedAt ? "   ·   updated " + page.shortDate(card.modelData.updatedAt)
+                                     : card.modelData.addedAt ? "   ·   added " + page.shortDate(card.modelData.addedAt) : "")
+                            color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize; elide: Text.ElideRight
+                        }
                     }
                 }
             }
@@ -157,6 +228,9 @@ Control {
                             radius: Style.cornerRadius; color: manager.sunken
                             border.color: manager.outlineSoft; border.width: 1
                             Image { id: preview; anchors.fill: parent; anchors.margins: 6; source: page.selected ? page.selected.previewImage : ""; asynchronous: true; fillMode: Image.PreserveAspectFit }
+                            HoverHandler { id: previewHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: page.openPage(page.selected) }
+                            PanelToolTip { visible: previewHover.hovered; text: "Open this plugin's page on plugins.omarchy.org" }
                         }
                         Text { Layout.fillWidth: true; visible: !!page.selected; text: page.selected ? page.selected.description : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.bodySize; wrapMode: Text.WordWrap; lineHeight: 1.25 }
                         GridLayout {
@@ -166,8 +240,22 @@ Control {
                             Text { text: page.selected ? (page.selected.license || "Not listed") : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
                             Text { text: "Registry"; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
                             Text { text: page.selected ? (page.selected.verificationStatus || "Not listed") : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: "Installs"; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: page.selected ? page.num(page.selected.installs) + "   (" + page.num(page.selected.views) + " views, " + page.num(page.selected.hearts) + " ♥)" : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: "Stars"; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: page.selected ? "★ " + (page.selected.stars || 0) : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: "Added"; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: page.selected ? (page.shortDate(page.selected.addedAt) || "Not listed") : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: "Updated"; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
+                            Text { text: page.selected ? (page.shortDate(page.selected.updatedAt) || "Not listed") : ""; color: manager.fg; font.family: Style.font.family; font.pixelSize: page.smallSize }
                         }
-                        Action { text: "View source ↗"; visible: !!page.selected; onClicked: Quickshell.execDetached(["xdg-open", page.selected.repo]) }
+                        Flow {
+                            visible: !!page.selected
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action { text: "Plugin page ↗"; onClicked: page.openPage(page.selected) }
+                            Action { text: "Source ↗"; onClicked: Quickshell.execDetached(["xdg-open", page.selected.repo]) }
+                        }
 
                         Rectangle { visible: !!page.selected; Layout.fillWidth: true; Layout.topMargin: 4; height: 1; color: manager.outlineSoft }
                         Text { visible: !!page.selected; text: page.selected && page.selected.installed ? "Already installed" : "Install"; color: manager.fg; font.family: Style.font.family; font.pixelSize: 16; font.bold: true }

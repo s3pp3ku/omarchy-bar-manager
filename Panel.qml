@@ -176,7 +176,7 @@ Item {
     function open(payloadJson) {
         probed = false
         // `omarchy-shell shell summon s3pp3ku.bar-manager '{"view":"layout"}'` opens straight into the Layout screen
-        try { var pl = JSON.parse(payloadJson || "{}"); if (["layout", "list", "saved", "updates", "install"].indexOf(pl.view) >= 0) root.view = pl.view } catch (e) {}
+        try { var pl = JSON.parse(payloadJson || "{}"); if (["layout", "list", "saved", "updates", "install", "shortcuts"].indexOf(pl.view) >= 0) root.view = pl.view } catch (e) {}
         closingFromHost = false
         root.opened = true
         refresh()
@@ -357,7 +357,28 @@ Item {
     }
 
     property var pending: null
-    function refresh() { listProc.running = true }
+    function refresh() { listProc.running = true; shortcutsProc.running = false; shortcutsProc.running = true }
+
+    // Every keybinding that opens a plugin (Omarchy defaults + the user's bindings), keyed by plugin id.
+    property var pluginKeys: ({})
+    Process {
+        id: shortcutsProc
+        command: ["python3", "-I", String(Qt.resolvedUrl("bin/shortcut.py")).replace("file://", ""), "list"]
+        stdout: StdioCollector {
+            onStreamFinished: { try { root.pluginKeys = JSON.parse(text).shortcuts || {} } catch (e) {} }
+        }
+    }
+    readonly property var keyChoices: items.filter(function(p) { return !p.isTray && p.enabled })
+        .map(function(p) {
+            // The shell routes a built-in's id to its enabled clone, so a clone inherits the original's shortcut.
+            var k = pluginKeys[p.id] || (p.clonedFrom ? pluginKeys[p.clonedFrom] : null)
+            return { id: p.id, name: p.name, combo: k ? k.combo : "", source: k ? k.source : "" }
+        })
+        .sort(function(a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1 })
+    readonly property var keySelected: {
+        for (var i = 0; i < keyChoices.length; i++) if (keyChoices[i].id === shortcutPlugin) return keyChoices[i]
+        return keyChoices.length ? keyChoices[0] : null
+    }
     function act(args, label) {
         root.confirmId = ""
         for (var i = 0; i < items.length; i++) if (items[i].id === args[1]) selectedPluginId = args[1]
@@ -1005,23 +1026,165 @@ Item {
                 Marketplace {
                     visible: root.view === "install"
                     Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.minimumWidth: 0; Layout.preferredWidth: 0
                     manager: root
                 }
 
                 ColumnLayout {
+                    id: keysView
                     visible: root.view === "shortcuts"
                     Layout.fillWidth: true; Layout.fillHeight: true
-                    Text { text: "Plugin launch shortcut"; color: root.fg; font.pixelSize: 18 }
-                    ComboBox { background: Rectangle { color: root.bg; border.color: root.outline; radius: Style.cornerRadius } id: shortcutChoice; Layout.fillWidth: true; textRole: "name"; model: root.items.filter(function(p) { return !p.isTray && p.enabled }); onActivated: root.shortcutPlugin = model[currentIndex].id }
-                    TextField { id: shortcutCombo; Layout.fillWidth: true; placeholderText: "SUPER + CTRL + G" }
-                    Text { Layout.fillWidth: true; text: "Checks live Hyprland bindings before saving. Requires at least one modifier. Existing shortcuts are preserved."; color: root.dim; wrapMode: Text.WordWrap }
-                    RowLayout {
-                        HeaderBtn { label: "Current"; onClicked: root.act(["shortcut", "status", root.shortcutPlugin || shortcutChoice.model[shortcutChoice.currentIndex].id], "Reading shortcut") }
-                        HeaderBtn { label: "Check"; onClicked: root.act(["shortcut", "check", root.shortcutPlugin || shortcutChoice.model[shortcutChoice.currentIndex].id, shortcutCombo.text], "Checking shortcut") }
-                        HeaderBtn { label: "Save"; onClicked: root.act(["shortcut", "save", root.shortcutPlugin || shortcutChoice.model[shortcutChoice.currentIndex].id, shortcutCombo.text], "Saving shortcut") }
-                        HeaderBtn { label: "Remove"; onClicked: root.act(["shortcut", "remove", root.shortcutPlugin || shortcutChoice.model[shortcutChoice.currentIndex].id], "Removing shortcut") }
+                    spacing: 12
+                    readonly property string pickedId: root.keySelected ? root.keySelected.id : ""
+
+                    Text { text: "Plugin launch shortcuts"; color: root.fg; font.family: root.mono; font.pixelSize: 18; font.bold: true }
+                    Text {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        text: "Pick a plugin, type a combination, Check it, then Save. Live Hyprland bindings are checked first and existing shortcuts are never overwritten."
+                        color: root.dim; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
                     }
-                    Item { Layout.fillHeight: true }
+
+                    Text { text: "PLUGIN"; color: root.dim; font.family: root.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
+                    ComboBox {
+                        id: shortcutChoice
+                        Layout.fillWidth: true
+                        implicitHeight: 38
+                        model: root.keyChoices
+                        textRole: "name"
+                        currentIndex: Math.max(0, root.keyChoices.indexOf(root.keySelected))
+                        background: Rectangle {
+                            radius: Style.cornerRadius; color: root.sunken
+                            border.color: shortcutChoice.popup.visible || shortcutChoice.hovered ? root.accent : root.outline
+                            border.width: shortcutChoice.popup.visible ? 2 : 1
+                        }
+                        contentItem: RowLayout {
+                            spacing: 10
+                            Text {
+                                Layout.leftMargin: 12; Layout.fillWidth: true
+                                text: root.keySelected ? root.keySelected.name : "No enabled plugins"
+                                color: root.fg; font.family: root.mono; font.pixelSize: Math.max(14, Style.font.body); elide: Text.ElideRight
+                            }
+                            Text {
+                                Layout.rightMargin: 8
+                                text: root.keySelected && root.keySelected.combo ? root.keySelected.combo : "no shortcut"
+                                color: root.keySelected && root.keySelected.combo ? root.accentText : root.dim
+                                font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body); font.bold: !!(root.keySelected && root.keySelected.combo)
+                            }
+                        }
+                        indicator: Text {
+                            x: shortcutChoice.width - width - 12; anchors.verticalCenter: parent.verticalCenter
+                            text: "▾"; color: root.dim; font.pixelSize: 14
+                        }
+                        rightPadding: 30
+                        popup: Popup {
+                            y: shortcutChoice.height + 4
+                            width: shortcutChoice.width
+                            height: Math.min(keyOptions.contentHeight + 8, 360)
+                            padding: 4
+                            background: Rectangle { radius: Style.cornerRadius; color: root.solidBg; border.color: root.accent; border.width: 1 }
+                            contentItem: ListView {
+                                id: keyOptions
+                                clip: true
+                                model: root.keyChoices
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: ScrollBar {}
+                                delegate: Rectangle {
+                                    id: keyOpt
+                                    required property var modelData
+                                    width: keyOptions.width; height: 34
+                                    radius: Style.cornerRadius
+                                    color: keyOptMa.containsMouse ? root.hoverSurface
+                                         : (root.keySelected && keyOpt.modelData.id === root.keySelected.id ? root.selectedSurface : "transparent")
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 16
+                                        spacing: 10
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: keyOpt.modelData.name
+                                            color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body); elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            text: keyOpt.modelData.combo || "—"
+                                            color: keyOpt.modelData.combo ? root.accentText : root.dim
+                                            font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body); font.bold: !!keyOpt.modelData.combo
+                                        }
+                                    }
+                                    MouseArea {
+                                        id: keyOptMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.shortcutPlugin = keyOpt.modelData.id
+                                            shortcutCombo.text = keyOpt.modelData.combo
+                                            shortcutChoice.popup.close()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Text { text: "SHORTCUT"; color: root.dim; font.family: root.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
+                    TextField {
+                        id: shortcutCombo
+                        Layout.fillWidth: true
+                        implicitHeight: 38
+                        leftPadding: 12; rightPadding: 12; topPadding: 0; bottomPadding: 0
+                        verticalAlignment: TextInput.AlignVCenter
+                        placeholderText: "SUPER + CTRL + G"
+                        color: root.fg; placeholderTextColor: root.dim
+                        font.family: root.mono; font.pixelSize: Math.max(14, Style.font.body)
+                        selectionColor: root.accent; selectedTextColor: root.onAccent
+                        background: Rectangle {
+                            radius: Style.cornerRadius; color: root.sunken
+                            border.color: shortcutCombo.activeFocus ? root.accent : root.outline
+                            border.width: shortcutCombo.activeFocus ? 2 : 1
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        text: !root.keySelected ? ""
+                            : root.keySelected.combo ? "Current: " + root.keySelected.combo + "  (" + root.keySelected.source + ")"
+                                + (root.keySelected.source === "Bar Manager" ? "" : ". Bar Manager won't change it; add a different combination if you want a second one.")
+                            : "No shortcut yet."
+                        color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
+                    }
+                    Row {
+                        spacing: 8
+                        Btn { label: "Check"; tip: "See if this combination is free"; onClicked: root.act(["shortcut", "check", keysView.pickedId, shortcutCombo.text], "Checking shortcut") }
+                        Btn { picked: true; bold: true; label: "Save"; tip: "Save this shortcut for the plugin"; onClicked: root.act(["shortcut", "save", keysView.pickedId, shortcutCombo.text], "Saving shortcut") }
+                        Btn {
+                            visible: !!root.keySelected && root.keySelected.source === "Bar Manager"
+                            danger: true; label: "Remove"; tip: "Remove the shortcut Bar Manager saved for this plugin"
+                            onClicked: root.act(["shortcut", "remove", keysView.pickedId], "Removing shortcut")
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; Layout.topMargin: 6; height: 1; color: root.outlineSoft }
+                    Text { text: "PLUGINS WITH SHORTCUTS"; color: root.dim; font.family: root.mono; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
+                    ListView {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        clip: true; spacing: 4
+                        model: root.keyChoices.filter(function(c) { return c.combo !== "" })
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: Rectangle {
+                            id: keyRow
+                            required property var modelData
+                            width: ListView.view.width - 12; height: 36
+                            radius: Style.cornerRadius
+                            readonly property bool chosen: root.keySelected && root.keySelected.id === modelData.id
+                            color: chosen ? root.selectedSurface : (keyRowHover.hovered ? root.hoverSurface : root.surface)
+                            border.color: chosen ? root.accent : root.outlineSoft; border.width: 1
+                            HoverHandler { id: keyRowHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: { root.shortcutPlugin = keyRow.modelData.id; shortcutCombo.text = keyRow.modelData.combo } }
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                spacing: 12
+                                Text { Layout.fillWidth: true; text: keyRow.modelData.name; color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body); elide: Text.ElideRight }
+                                Text { text: keyRow.modelData.source; color: root.dim; font.family: root.mono; font.pixelSize: 12 }
+                                Text { Layout.preferredWidth: 220; horizontalAlignment: Text.AlignRight; text: keyRow.modelData.combo; color: root.accentText; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body); font.bold: true }
+                            }
+                        }
+                    }
                 }
 
                 ColumnLayout {
