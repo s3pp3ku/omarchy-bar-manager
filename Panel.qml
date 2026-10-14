@@ -26,6 +26,12 @@ Item {
     property string shortcutPlugin: ""
     property string marketSearch: ""
     property string marketScope: "All"
+    property string marketSort: "Installs"
+    property string pendingMarketId: ""      // reselected once the catalog is back after a reopen
+    property string reopenNote: ""           // what was done before the reload, kept over the catalog's own message
+    property string updatesQuery: ""
+    property string updatesShow: "All"
+    property string updatesSort: "Status"
     property string filter: ""
     property string status: ""
     property bool statusOk: true
@@ -132,10 +138,33 @@ Item {
         dragInfo = null
         dropTarget = null
         if (!t || !d) return
-        if (t.intray) act(["intray", d.id, t.intray], "Putting " + d.name + " in the tray")
-        else act(["drop", d.id, t.edge, t.section, t.before], "Moving " + d.name)
+        if (t.trash) { removeFromLayout(d); return }
+        if (t.intray) act(["intray", d.id, t.intray, t.edge, d.edge], "Putting " + d.name + " in the tray")
+        else act(["drop", d.id, t.edge, t.section, t.before, d.edge], "Moving " + d.name)
     }
+    // Dropped on the trash: off this bar only when it is on several, else hidden (Show brings it back where it was).
+    function removeFromLayout(d) {
+        if (d.isTray) { act(["rmtray", d.id], "Deleting " + d.name); return }
+        var item = null
+        for (var i = 0; i < items.length; i++) if (items[i].id === d.id) item = items[i]
+        var bars = item ? (item.bars || []) : []
+        if (!d.inTray && d.edge && bars.length > 1) act(["toggle", d.id, d.edge], "Taking " + d.name + " off the " + d.edge + " bar")
+        else act(["hide", d.id], "Hiding " + d.name)
+    }
+    function trashHint(d) {
+        if (!d) return ""
+        if (d.isTray) return "Delete " + d.name + " (its widgets stay on the bar)"
+        var item = null
+        for (var i = 0; i < items.length; i++) if (items[i].id === d.id) item = items[i]
+        return !d.inTray && d.edge && item && (item.bars || []).length > 1 ? "Take " + d.name + " off the " + d.edge + " bar" : "Hide " + d.name
+    }
+    property Item trashItem: null
     function targetAt(px, py) {
+        if (trashItem && trashItem.visible) {
+            var tp = trashItem.mapToItem(canvasItem, 0, 0)
+            if (px >= tp.x && px <= tp.x + trashItem.width && py >= tp.y && py <= tp.y + trashItem.height)
+                return { trash: true, rect: { x: tp.x, y: tp.y, w: trashItem.width, h: trashItem.height }, cellKey: "" }
+        }
         for (var i = 0; i < zoneItems.length; i++) {
             var z = zoneItems[i]
             if (!z.visible) continue
@@ -148,10 +177,10 @@ Item {
     function zoneTarget(z, lx, ly, zp) {
         var d = dragInfo
         var isMain = z.edge === layoutData.main
-        if (d.isTray && isMain) return null            // built-in trays live on the extra bars
+        if (d.isTray && isMain && !layoutData.nativeHost) return null
         if (d.mainTray && !isMain) return null         // the real Tray plugin stays on the main bar
         var slots = z.slotInfo(d.id)
-        if (!d.isTray && !d.mainTray) {
+        if (!d.isTray && !d.mainTray && d.id !== "s3pp3ku.tray") {
             for (var t = 0; t < slots.length; t++) {   // over a tray: the widget goes inside it
                 var s = slots[t]
                 if (s.isTray && lx >= s.x && lx <= s.x + s.w && ly >= s.y && ly <= s.y + s.h)
@@ -175,6 +204,11 @@ Item {
 
     function open(payloadJson) {
         probed = false
+        var wasReopen = reopenPending
+        if (!root.opened && !reopenPending) root.view = "list"
+        reopenPending = false
+        if (wasReopen && root.view === "install" && !root.marketplace.length)
+            Qt.callLater(function() { root.act(["marketplace"], "Loading marketplace") })
         // `omarchy-shell shell summon s3pp3ku.bar-manager '{"view":"layout"}'` opens straight into the Layout screen
         try { var pl = JSON.parse(payloadJson || "{}"); if (["layout", "list", "saved", "updates", "install", "shortcuts"].indexOf(pl.view) >= 0) root.view = pl.view } catch (e) {}
         closingFromHost = false
@@ -201,6 +235,7 @@ Item {
     property string layoutName: "My layout"
     property string restoreConfirm: ""
     property var commandQueue: []
+    property bool reopenPending: false
     property var activeArgs: []
     property bool remembering: false
     readonly property string uiPath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/bar-manager/ui.json"
@@ -208,7 +243,11 @@ Item {
     function remember(reopen) {
         if (remembering) return
         uiFile.setText(JSON.stringify({ view: view, filter: filter, collapsed: collapsed,
-            selectedKey: selectedKey, selectedPluginId: selectedPluginId, scroll: pluginList.contentY, reopen: !!reopen, at: Date.now() }))
+            selectedKey: selectedKey, selectedPluginId: selectedPluginId, scroll: pluginList.contentY, reopen: !!reopen, at: Date.now(),
+            // Omarchy closes every plugin panel when a plugin is added, removed or updated; this is what comes back.
+            status: status, statusOk: statusOk,
+            market: { search: marketSearch, scope: marketScope, sort: marketSort, selected: marketSelection ? marketSelection.id : "" },
+            updates: { query: updatesQuery, show: updatesShow, sort: updatesSort, reports: updateReports } }))
     }
     Timer { id: rememberDelay; interval: 250; onTriggered: root.remember(false) }
     FileView {
@@ -220,14 +259,32 @@ Item {
             try {
                 var state = JSON.parse(uiFile.text())
                 root.remembering = true
-                root.view = state.view || "list"
-                root.filter = state.filter || ""
+                // A fresh open starts on the List; only the reopen after a change goes back to the tab it was made from.
+                var reopening = state.reopen && Date.now() - state.at < 60000
+                root.view = reopening && state.view ? state.view : "list"
+                root.filter = reopening ? (state.filter || "") : ""
                 root.collapsed = state.collapsed || {}
                 root.selectedKey = state.selectedKey || ""
                 root.selectedPluginId = state.selectedPluginId || ""
                 root.savedScroll = state.scroll || 0
+                var market = state.market || {}, upd = state.updates || {}
+                root.marketScope = market.scope || "All"
+                root.marketSort = market.sort || "Installs"
+                root.updatesShow = upd.show || "All"
+                root.updatesSort = upd.sort || "Status"
+                if (reopening) {
+                    root.marketSearch = market.search || ""
+                    root.pendingMarketId = market.selected || ""
+                    root.updatesQuery = upd.query || ""
+                    root.updateReports = Array.isArray(upd.reports) ? upd.reports : []
+                    var last = String(state.status || "").replace(/…$/, "")
+                    root.status = last ? last + " — done; Omarchy reloaded its plugins" : ""
+                    root.reopenNote = root.status
+                    root.statusOk = state.statusOk !== false
+                }
                 root.remembering = false
-                if (state.reopen && Date.now() - state.at < 60000) {
+                if (reopening) {
+                    root.reopenPending = true
                     root.open("{}")
                     root.remember(false)
                 }
@@ -235,6 +292,10 @@ Item {
         }
     }
     onFilterChanged: rememberDelay.restart()
+    onMarketScopeChanged: rememberDelay.restart()
+    onMarketSortChanged: rememberDelay.restart()
+    onUpdatesShowChanged: rememberDelay.restart()
+    onUpdatesSortChanged: rememberDelay.restart()
     onViewChanged: rememberDelay.restart()
     function fold(key) {
         var next = Object.assign({}, collapsed)
@@ -357,7 +418,34 @@ Item {
     }
 
     property var pending: null
-    function refresh() { listProc.running = true; shortcutsProc.running = false; shortcutsProc.running = true }
+    function refresh() {
+        listProc.running = true
+        shortcutsProc.running = false; shortcutsProc.running = true
+        shellPluginsProc.running = false; shellPluginsProc.running = true
+    }
+
+    // Enabled panel plugins (not bar widgets) can have launch shortcuts too.
+    property var panelPlugins: []
+    property var allPlugins: []
+    function pluginName(id) {
+        for (var i = 0; i < items.length; i++) if (items[i].id === id) return items[i].name
+        for (var j = 0; j < allPlugins.length; j++) if (allPlugins[j].id === id) return allPlugins[j].name || id
+        return id
+    }
+    Process {
+        id: shellPluginsProc
+        command: ["omarchy-shell", "shell", "listPlugins"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    root.allPlugins = JSON.parse(text)
+                    root.panelPlugins = root.allPlugins.filter(function(p) {
+                        return p.enabled && (p.kinds || []).indexOf("panel") >= 0 && (p.kinds || []).indexOf("bar-widget") < 0
+                    })
+                } catch (e) {}
+            }
+        }
+    }
 
     // Every keybinding that opens a plugin (Omarchy defaults + the user's bindings), keyed by plugin id.
     property var pluginKeys: ({})
@@ -369,6 +457,7 @@ Item {
         }
     }
     readonly property var keyChoices: items.filter(function(p) { return !p.isTray && p.enabled })
+        .concat(panelPlugins.filter(function(p) { return !items.some(function(i) { return i.id === p.id }) }))
         .map(function(p) {
             // The shell routes a built-in's id to its enabled clone, so a clone inherits the original's shortcut.
             var k = pluginKeys[p.id] || (p.clonedFrom ? pluginKeys[p.clonedFrom] : null)
@@ -425,7 +514,28 @@ Item {
             }
             var msg = (code === 0 ? rOut.text : (rErr.text || rOut.text)).trim().split("\n")
             root.status = root.activeArgs[0] === "check-updates" && code === 0 ? "Review each update before applying it" : (msg[msg.length - 1] || (code === 0 ? "Done" : "Failed"))
-            if (code === 0 && root.activeArgs[0] === "marketplace") root.status = "Marketplace loaded: " + root.marketplace.length + " plugins"
+            if (code === 0 && root.activeArgs[0] === "marketplace") {
+                root.status = root.reopenNote || ("Marketplace loaded: " + root.marketplace.length + " plugins")
+                root.reopenNote = ""
+                if (root.pendingMarketId) {
+                    var picked = root.marketplace.filter(function(p) { return p.id === root.pendingMarketId })[0]
+                    if (picked) root.marketSelection = picked
+                    root.pendingMarketId = ""
+                }
+            }
+            if (code === 0 && root.activeArgs[0] === "apply-updates") {
+                try {
+                    var results = JSON.parse(rOut.text), done = 0
+                    root.updateReports = root.updateReports.map(function(r) {
+                        var hit = results.filter(function(x) { return x.token === r.token && r.token })[0]
+                        if (!hit) return r
+                        if (hit.ok) done++
+                        return Object.assign({}, r, hit.ok ? { status: "updated", token: "" } : { status: "failed", summary: hit.message })
+                    })
+                    root.status = "Updated " + done + " of " + results.length + " plugins"
+                    root.statusOk = done === results.length
+                } catch (e) { root.statusOk = false }
+            }
             if (code === 0 && root.activeArgs[0] === "apply-update") {
                 var reports = root.updateReports.slice()
                 for (var i = 0; i < reports.length; i++) if (reports[i].token === root.activeArgs[1]) {
@@ -840,7 +950,7 @@ Item {
                                         model: [{ k: "top", t: "Top" }, { k: "bottom", t: "Bottom" }, { k: "left", t: "Left" }, { k: "right", t: "Right" }]
                                         SegBtn {
                                             required property var modelData
-                                            enabled: modelData.k !== root.layoutData.main
+                                            enabled: root.layoutData.nativeHost || modelData.k !== root.layoutData.main
                                             label: modelData.t + (modelData.k === root.layoutData.main ? " (main)" : "")
                                             picked: root.trayEdge === modelData.k
                                             onClicked: root.trayEdge = modelData.k
@@ -876,7 +986,7 @@ Item {
                                     : ({ left: "left", center: "center", right: "right" }[root.traySection])
                                 text: "Adds " + root.nextTrayId.replace("tray:", "") + " to the " + sectionName + " of the " + root.trayEdge + " bar."
                                       + (root.edgeHasBar(root.trayEdge) ? "" : "  There's no " + root.trayEdge + " bar yet, so one will be created.")
-                                      + "  The main (" + root.layoutData.main + ") bar keeps its trays in the Tray plugin."
+                                      + (root.layoutData.nativeHost ? "  Native drawers work on every edge." : "  The main (" + root.layoutData.main + ") bar keeps its trays in the Tray plugin.")
                                 color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
                             }
                             Btn {
@@ -970,11 +1080,45 @@ Item {
                         BarBox { id: leftBox; edge: "left"; barData: canvas.dataOf("left"); x: 0; y: canvas.topH; width: canvas.leftW; height: canvas.height - canvas.topH - canvas.botH }
                         BarBox { id: rightBox; edge: "right"; barData: canvas.dataOf("right"); x: canvas.width - canvas.rightW; y: canvas.topH; width: canvas.rightW; height: canvas.height - canvas.topH - canvas.botH }
 
-                        Text {
-                            anchors.centerIn: parent
-                            text: "your screen\ndrag a widget to a slot  ·  drop it on a tray to put it inside"
-                            horizontalAlignment: Text.AlignHCenter
-                            color: root.dim; font.family: root.mono; font.pixelSize: Style.font.body
+                        Column {
+                            x: canvas.leftW + (canvas.width - canvas.leftW - canvas.rightW - width) / 2
+                            y: canvas.topH + (canvas.height - canvas.topH - canvas.botH - height) / 2
+                            spacing: 14
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: "your screen\ndrag a widget to a slot  ·  drop it on a tray to put it inside"
+                                horizontalAlignment: Text.AlignHCenter
+                                color: root.dim; font.family: root.mono; font.pixelSize: Style.font.body
+                            }
+                            Rectangle {
+                                id: trash
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                Component.onCompleted: root.trashItem = trash
+                                readonly property bool armed: root.dragInfo !== null
+                                readonly property bool over: root.dropTarget !== null && root.dropTarget.trash === true
+                                width: Math.max(180, trashLabel.implicitWidth + 32); height: 92
+                                radius: Style.cornerRadius
+                                color: over ? root.mix(root.bad, root.surface, 0.3) : (armed ? root.mix(root.bad, root.surface, 0.08) : root.surface)
+                                border.color: armed ? root.bad : root.outline
+                                border.width: over ? 3 : (armed ? 2 : 1)
+                                Column {
+                                    anchors.centerIn: parent
+                                    spacing: 6
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: "\uf1f8"
+                                        color: trash.armed ? root.bad : root.dim
+                                        font.family: root.mono; font.pixelSize: trash.over ? 30 : 26
+                                    }
+                                    Text {
+                                        id: trashLabel
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: trash.over ? root.trashHint(root.dragInfo) : (trash.armed ? "Drop here to remove" : "Drag a widget here to remove it")
+                                        color: trash.armed ? root.bad : root.dim
+                                        font.family: root.mono; font.pixelSize: Math.max(12, Style.font.caption); font.bold: trash.over
+                                    }
+                                }
+                            }
                         }
 
                         Rectangle {   // hover label: which widget a chip is
@@ -1227,29 +1371,158 @@ Item {
                     }
                 }
                 ColumnLayout {
+                    id: updatesView
                     visible: root.view === "updates"
                     Layout.fillWidth: true; Layout.fillHeight: true
+                    spacing: 12
+                    readonly property string query: root.updatesQuery
+                    readonly property string show: root.updatesShow
+                    readonly property string sortBy: root.updatesSort
+                    property bool confirmAll: false
+                    readonly property var rank: ({ available: 0, failed: 1, updated: 2, skipped: 3, current: 4 })
+                    function count(status) { return root.updateReports.filter(function(r) { return r.status === status }).length }
+                    readonly property var pendingTokens: root.updateReports.filter(function(r) { return r.status === "available" && r.token }).map(function(r) { return r.token })
+                    readonly property var rows: {
+                        var q = query.toLowerCase().trim(), want = ({ Updates: ["available", "failed"], Skipped: ["skipped"], "Up to date": ["current", "updated"] })[show]
+                        return root.updateReports.filter(function(r) {
+                            if (want && want.indexOf(r.status) < 0) return false
+                            return !q || (root.pluginName(r.id) + " " + r.id + " " + (r.summary || "")).toLowerCase().indexOf(q) >= 0
+                        }).sort(function(a, b) {
+                            var byName = root.pluginName(a.id).toLowerCase() < root.pluginName(b.id).toLowerCase() ? -1 : 1
+                            if (sortBy === "Name") return byName
+                            return (rank[a.status] - rank[b.status]) || byName
+                        })
+                    }
+                    onPendingTokensChanged: if (!pendingTokens.length) confirmAll = false
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text { text: "Plugin updates"; color: root.fg; font.family: root.mono; font.pixelSize: 18; font.bold: true }
+                            Text {
+                                Layout.fillWidth: true; elide: Text.ElideRight
+                                text: root.busy && !root.updateReports.length ? "Checking installed plugins…"
+                                    : !root.updateReports.length ? "Nothing checked yet."
+                                    : updatesView.count("available") + " to update   ·   " + updatesView.count("skipped") + " skipped   ·   "
+                                      + (updatesView.count("current") + updatesView.count("updated")) + " up to date"
+                                      + (updatesView.count("failed") ? "   ·   " + updatesView.count("failed") + " failed" : "")
+                                color: root.dim; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
+                            }
+                        }
+                        Btn { label: "Check again"; tip: "Look for new commits on every git-installed plugin"; onClicked: { updatesView.confirmAll = false; root.reviewUpdates("--all") } }
+                        Btn {
+                            visible: updatesView.pendingTokens.length > 0
+                            picked: true; bold: true
+                            label: updatesView.confirmAll ? "Yes, update " + updatesView.pendingTokens.length : "Update all (" + updatesView.pendingTokens.length + ")"
+                            tip: updatesView.confirmAll ? "Click again to install every update listed" : "Install every available update — asks first"
+                            onClicked: {
+                                if (!updatesView.confirmAll) { updatesView.confirmAll = true; return }
+                                updatesView.confirmAll = false
+                                root.act(["apply-updates"].concat(updatesView.pendingTokens), "Updating " + updatesView.pendingTokens.length + " plugins")
+                            }
+                        }
+                        Btn { visible: updatesView.confirmAll; label: "Cancel"; onClicked: updatesView.confirmAll = false }
+                    }
+
                     Text {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        text: root.busy ? "Checking installed plugins…" : "Review changes below. Apply installs the exact commit shown. Plugins with local edits are skipped."
-                        color: root.dim; font.family: root.mono; font.pixelSize: Style.font.body
+                        visible: updatesView.confirmAll
+                        text: "Installs the exact commits listed under each plugin. Plugins with local edits are already skipped, and a plugin that fails its check is rolled back while the rest carry on."
+                        color: root.fg; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body)
                     }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 16
+                        Rectangle {
+                            Layout.fillWidth: true; Layout.preferredHeight: 34
+                            radius: Style.cornerRadius; color: root.sunken
+                            border.color: updSearch.activeFocus ? root.accent : root.outline
+                            border.width: updSearch.activeFocus ? 2 : 1
+                            TextInput {
+                                id: updSearch
+                                text: root.updatesQuery
+                                anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: root.fg; font.family: root.mono; font.pixelSize: Math.max(14, Style.font.body)
+                                selectionColor: root.accent; selectedTextColor: root.onAccent
+                                clip: true
+                                onTextChanged: root.updatesQuery = text
+                                Text { visible: !updSearch.text; text: "Search plugins or commit messages"; color: root.dim; font: updSearch.font }
+                            }
+                        }
+                        Labeled {
+                            title: "Show"
+                            SegGroup {
+                                Repeater {
+                                    model: ["All", "Updates", "Skipped", "Up to date"]
+                                    SegBtn { required property string modelData; label: modelData; picked: updatesView.show === modelData; onClicked: root.updatesShow = modelData }
+                                }
+                            }
+                        }
+                        Labeled {
+                            title: "Sort"
+                            SegGroup {
+                                Repeater {
+                                    model: ["Status", "Name"]
+                                    SegBtn { required property string modelData; label: modelData; picked: updatesView.sortBy === modelData; onClicked: root.updatesSort = modelData }
+                                }
+                            }
+                        }
+                    }
+
                     ListView {
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                        model: root.updateReports
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        clip: true; spacing: 8
+                        model: updatesView.rows
+                        ScrollBar.vertical: ScrollBar {}
+                        Text {
+                            anchors.centerIn: parent
+                            visible: parent.count === 0 && root.updateReports.length > 0
+                            text: "Nothing matches."
+                            color: root.dim; font.family: root.mono; font.pixelSize: 15
+                        }
                         delegate: Rectangle {
+                            id: upd
                             required property var modelData
-                            width: ListView.view.width; height: updateContent.implicitHeight + 16
+                            readonly property string st: modelData.status
+                            width: ListView.view.width - 12
+                            height: updBody.implicitHeight + 24
+                            radius: Style.cornerRadius
                             color: root.surface
+                            border.color: st === "available" ? root.accent : (st === "failed" ? root.bad : root.outlineSoft)
+                            border.width: st === "available" ? 2 : 1
                             ColumnLayout {
-                                id: updateContent
-                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8
+                                id: updBody
+                                x: 14; y: 12; width: parent.width - 28
+                                spacing: 8
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Text { Layout.fillWidth: true; text: modelData.id + " · " + modelData.status; elide: Text.ElideRight; color: root.accentText; font.family: root.mono; font.pixelSize: Math.max(13, Style.font.body) }
-                                    Btn { visible: modelData.status === "available"; label: "Apply " + (modelData.commit || ""); tip: "Install these reviewed changes"; onClicked: root.act(["apply-update", modelData.token], "Applying update") }
+                                    spacing: 10
+                                    Text { text: root.pluginName(upd.modelData.id); color: root.fg; font.family: root.mono; font.pixelSize: Math.max(15, Style.font.body + 1); font.bold: true; elide: Text.ElideRight; Layout.maximumWidth: updBody.width * 0.5 }
+                                    Badge {
+                                        label: ({ available: "update", current: "up to date", skipped: "skipped", updated: "updated", failed: "failed" })[upd.st] || upd.st
+                                        tone: upd.st === "available" ? root.warn : (upd.st === "failed" ? root.bad : (upd.st === "skipped" ? root.dim : root.good))
+                                    }
+                                    Text { Layout.fillWidth: true; text: upd.modelData.id; color: root.dim; font.family: root.mono; font.pixelSize: 12; elide: Text.ElideRight }
+                                    Btn {
+                                        visible: upd.st === "available"
+                                        label: "Update" + (upd.modelData.commit ? " to " + upd.modelData.commit.slice(0, 7) : "")
+                                        tip: "Install the commits listed below"
+                                        onClicked: root.act(["apply-update", upd.modelData.token], "Updating " + root.pluginName(upd.modelData.id))
+                                    }
                                 }
-                                Text { Layout.fillWidth: true; text: modelData.summary; wrapMode: Text.WrapAnywhere; color: root.fg; font.family: root.mono; font.pixelSize: Style.font.caption }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: upd.st !== "current" && upd.st !== "updated" && !!upd.modelData.summary
+                                    text: upd.modelData.summary || ""
+                                    wrapMode: Text.WrapAnywhere
+                                    color: upd.st === "available" ? root.fg : root.dim
+                                    font.family: root.mono; font.pixelSize: Math.max(12, Style.font.caption)
+                                }
                             }
                         }
                     }
@@ -1507,10 +1780,14 @@ Item {
                                                 onClicked: {
                                                     // cycle: none -> first tray -> next tray ... -> none (back onto the bar)
                                                     var trays = []
-                                                    for (var i = 0; i < root.items.length; i++) if (root.items[i].isTray) trays.push(root.items[i].id)
+                                                    var edge = row.modelData.contextBar || row.modelData.bar || root.layoutData.main
+                                                    for (var i = 0; i < root.items.length; i++) {
+                                                        var candidate = root.items[i]
+                                                        if (candidate.isTray || (candidate.id === "s3pp3ku.tray" && candidate.bars.indexOf(edge) !== -1)) trays.push(candidate.id)
+                                                    }
                                                     if (trays.length === 0) { root.status = "Add a tray first (+ Tray)"; root.statusOk = false; return }
                                                     var cur = trays.indexOf(row.modelData.tray)
-                                                    if (cur + 1 < trays.length) root.act(["intray", row.modelData.id, trays[cur + 1]], "Putting in " + trays[cur + 1])
+                                                    if (cur + 1 < trays.length) root.act(["intray", row.modelData.id, trays[cur + 1], edge, edge], "Putting in " + trays[cur + 1])
                                                     else root.act(["place", row.modelData.id, row.modelData.bar || "bottom", row.curSection()], "Taking out of tray")
                                                 }
                                             }
@@ -1555,6 +1832,8 @@ Item {
 
     component MemberChip: Rectangle {
         id: mchip
+        property string edge: ""
+        property string trayId: ""
         property var entry: ({})
         implicitWidth: 22
         implicitHeight: 20
@@ -1581,11 +1860,12 @@ Item {
             font.bold: !mchip.entry.icon
         }
         HoverHandler { onHoveredChanged: { if (hovered) root.showTip(mchip, mchip.entry.name + "\n" + mchip.entry.id); else root.hideTip(mchip) } }
-        GrabArea { anchors.fill: parent; info: ({ id: mchip.entry.id, name: mchip.entry.name, isTray: false, mainTray: false }) }
+        GrabArea { anchors.fill: parent; info: ({ id: mchip.entry.id, name: mchip.entry.name, isTray: false, mainTray: false, edge: mchip.edge, inTray: mchip.trayId }) }
     }
 
     component Chip: Rectangle {
         id: chip
+        property string edge: ""
         property var entry: ({})
         property real maxW: 999
         readonly property bool isTray: !!entry.tray
@@ -1627,20 +1907,21 @@ Item {
             x: 5; y: 22
             width: chip.width - 10
             spacing: 3
-            Repeater { model: chip.members; delegate: MemberChip { required property var modelData; entry: modelData } }
+            Repeater { model: chip.members; delegate: MemberChip { required property var modelData; entry: modelData; edge: chip.edge; trayId: chip.entry.id } }
         }
         HoverHandler { onHoveredChanged: { if (hovered) root.showTip(chip, chip.entry.name + "\n" + chip.entry.id); else root.hideTip(chip) } }
         // plain chips grab anywhere; a tray only by its header, so its members can be grabbed on their own
         GrabArea {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
             height: chip.isTray ? 20 : parent.height
-            info: ({ id: chip.entry.id, name: chip.entry.name, isTray: chip.isTray && !chip.mainTray, mainTray: chip.mainTray })
+            info: ({ id: chip.entry.id, name: chip.entry.name, isTray: chip.isTray && !chip.mainTray && chip.entry.id !== "s3pp3ku.tray", mainTray: chip.mainTray, edge: chip.edge, inTray: "" })
         }
     }
 
     // One numbered grid cell: a widget sits in it, or it is the spare cell at the end of a section.
     component Cell: Rectangle {
         id: cell
+        property string edge: ""
         property var entry: ({})
         property int num: 1
         property real maxW: 999
@@ -1665,7 +1946,7 @@ Item {
             id: chipHolder
             active: !cell.spare
             x: 2; y: 6
-            sourceComponent: Component { Chip { entry: cell.entry; maxW: cell.maxW } }
+            sourceComponent: Component { Chip { entry: cell.entry; maxW: cell.maxW; edge: cell.edge } }
         }
     }
 
@@ -1698,6 +1979,7 @@ Item {
                 delegate: Cell {
                     required property var modelData
                     required property int index
+                    edge: zone.edge
                     entry: modelData
                     num: index + 1
                     maxW: zone.width - 10

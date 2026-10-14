@@ -12,6 +12,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
+import tray_layout
 
 HOME = Path.home()
 CFG = Path(os.environ.get('OMARCHY_SHELL_JSON', HOME / '.config/omarchy/shell.json'))
@@ -20,7 +21,7 @@ STATE = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state'))
 DATA = STATE / 'bar-manager'
 PLUGINS = Path(os.environ.get('BARCTL_PLUGINS_DIR', HOME / '.config/omarchy/plugins'))
 CORE = Path(__file__).with_name('barctl-core')
-MEMORIES = ['barctl-hidden.json', 'barctl-removed-main-entries.json', 'barctl-removed-bars.json']
+MEMORIES = ['barctl-hidden.json', 'barctl-removed-main-entries.json', 'barctl-removed-bars.json', 'barctl-private-tray-hidden.json']
 BAR_KEYS = ['layout', 'position', 'transparent', 'centerAnchor']
 MUTATIONS = {'place', 'drop', 'toggle', 'setsection', 'hide', 'show', 'enable', 'disable', 'fix', 'togglebar', 'mainpos', 'swapbars', 'addtray', 'rmtray', 'intray', 'reorder', 'move-section'}
 
@@ -90,6 +91,115 @@ def entry_id(e):
     return e.get('id', '') if isinstance(e, dict) else e
 
 
+def widget_settings(ident, edge, payload):
+    """Persist a hosted widget's inline options without moving its button."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', ident) or '..' in ident:
+        raise RuntimeError('Invalid widget ID')
+    if edge not in ('top', 'bottom', 'left', 'right'):
+        raise RuntimeError('Invalid bar edge')
+    settings = json.loads(payload)
+    if not isinstance(settings, dict):
+        raise RuntimeError('Widget settings must be an object')
+    # Patch only options, never let a payload replace the widget or its tray.
+    settings = {k: v for k, v in settings.items() if k not in ('id', 'widgets')}
+    cfg, extra = read(CFG, {}), read(EXTRA, {'bars': []})
+    remembered = read(STATE / 'barctl-removed-main-entries.json', {})
+    try:
+        tray_layout.save_settings(cfg, extra, ident, edge, settings, remembered)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    if cfg != read(CFG, {}):
+        write(CFG, cfg)
+    if extra != read(EXTRA, {'bars': []}):
+        write(EXTRA, extra)
+    return 'Saved widget settings'
+
+
+def tray_action(args):
+    cfg, extra = read(CFG, {}), read(EXTRA, {'bars': []})
+    cmd = args[0]
+    if cmd == 'fork-tray':
+        tray_layout.migrate(cfg, extra)
+    elif cmd == 'tray-capture' or cmd == 'intray':
+        if cmd == 'intray':
+            ident, edge = args[1], args[3] if len(args) > 3 else cfg['bar'].get('position', 'top')
+            order, source = None, args[4] if len(args) > 4 else ''
+        else:
+            ident, edge = args[2:4]
+            order = json.loads(args[4]) if len(args) > 4 else None
+            source = args[5] if len(args) > 5 else ''
+        manifest = next((p for p in catalog() if p['id'] == ident), None)
+        if manifest and 'service' in manifest.get('kinds', []) and not native_host_ready():
+            raise RuntimeError('This widget needs a companion service. Keep it directly on any bar; capturing it inside the Tray is not supported safely yet.')
+        tray_layout.capture(cfg, extra, ident, edge, order, source)
+    elif cmd == 'tray-release':
+        tray_layout.release(cfg, extra, args[2], args[3], args[4] if len(args) > 4 else 'right', args[5] if len(args) > 5 else '')
+    elif cmd in ('place', 'drop'):
+        tray_layout.move(cfg, extra, args[2], args[3] if len(args) > 3 else 'right', args[4] if len(args) > 4 else '', args[5] if len(args) > 5 else '')
+    elif cmd == 'toggle':
+        memory_path = STATE / 'barctl-private-tray-hidden.json'
+        memory = read(memory_path, {})
+        edge = args[2]
+        removed = tray_layout.toggle(cfg, extra, edge, args[3] if len(args) > 3 else 'right', memory.get(edge))
+        if removed:
+            memory[edge] = removed
+        else:
+            memory.pop(edge, None)
+        write(memory_path, memory)
+    else:
+        raise RuntimeError('Unsupported private Tray action')
+    # Keep component references alive before rebuilding any extra-bar widgets.
+    if cfg != read(CFG, {}):
+        write(CFG, cfg)
+    if extra != read(EXTRA, {'bars': []}):
+        write(EXTRA, extra)
+    return 'Updated your four-edge Tray'
+
+
+def native_host_ready():
+    ipc = HOME / '.config/omarchy/native-bars/bin/omarchy-shell'
+    flag = ipc.parent.parent / 'enabled'
+    if not flag.is_file() or not ipc.is_file():
+        return False
+    try:
+        status = json.loads(run([ipc, 'shell', 'nativeBarStatus'], timeout=4))
+        return status.get('version') == 1 and status.get('renderer') == 'native'
+    except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def native_drop(args):
+    cfg, extra = read(CFG, {}), read(EXTRA, {'bars': []})
+    tray_layout.move_widget(cfg, extra, args[1], args[2], args[3], args[4], args[5])
+    if cfg != read(CFG, {}):
+        write(CFG, cfg)
+    if extra != read(EXTRA, {'bars': []}):
+        write(EXTRA, extra)
+    return 'Moved native bar widget'
+
+
+def native_drawer_action(args):
+    cfg, extra = read(CFG, {}), read(EXTRA, {'bars': []})
+    cmd = args[0]
+    if cmd == 'addtray':
+        edge = args[1]
+        if edge == 'auto':
+            edge = next((b['position'] for b in extra['bars']), 'bottom' if cfg['bar'].get('position','top') != 'bottom' else 'top')
+        ident = tray_layout.add_drawer(cfg, extra, edge, args[2] if len(args) > 2 else 'right')
+        output = 'Added ' + ident
+    elif cmd == 'rmtray':
+        tray_layout.remove_drawer(cfg, extra, args[1], args[2] if len(args) > 2 else '')
+        output = 'Removed drawer; its widgets stay on their bar'
+    else:
+        tray_layout.capture_drawer(cfg, extra, args[1], args[2], args[3] if len(args) > 3 else '', args[4] if len(args) > 4 else '')
+        output = 'Put widget in native drawer'
+    if cfg != read(CFG, {}):
+        write(CFG, cfg)
+    if extra != read(EXTRA, {'bars': []}):
+        write(EXTRA, extra)
+    return output
+
+
 def apply_snapshot(s):
     if s.get('schema') != 1 or not isinstance(s.get('extra', {}).get('bars'), list):
         raise RuntimeError('Unsupported or invalid layout snapshot')
@@ -129,21 +239,48 @@ def apply_snapshot(s):
     for b in extra['bars']:
         for section in ('left', 'center', 'right'):
             b[section] = entries(b.get(section, []))
+    # Older snapshots may have side-bar buttons without enabled plugin
+    # references. Extra Bars can draw them, but the shell refuses to load
+    # their overlays/services unless their ids also appear in shell.json.
+    enabled_ids = {entry_id(p) for p in cfg['plugins']}
+    for b in extra['bars']:
+        for section in ('left', 'center', 'right'):
+            for e in b[section]:
+                hosted = [e] + e.get('widgets', []) if isinstance(e, dict) else [e]
+                for widget in hosted:
+                    ident = entry_id(widget.get('entry', widget) if isinstance(widget, dict) else widget)
+                    if ident in available and ident not in enabled_ids:
+                        cfg['plugins'].append({'id': ident})
+                        enabled_ids.add(ident)
     # Validate all data before writing either configuration.
+    write(CFG, cfg)
     write(EXTRA, extra)
     for name in MEMORIES:
         write(STATE / name, s['memory'].get(name, {}))
-    write(CFG, cfg)
     return skipped
 
 
 def core(args):
+    if args[0] == 'native-drop':
+        return native_drop(args)
+    if args[0] in ('drop', 'place') and len(args) > 5 and args[5] and native_host_ready():
+        return native_drop(['native-drop'] + args[1:6])
+    if ((args[0] in ('addtray', 'rmtray')) or (args[0] == 'intray' and len(args) > 2 and args[2].startswith('tray:'))) and native_host_ready():
+        return native_drawer_action(args)
+    if (args[0] in ('fork-tray', 'tray-capture', 'tray-release')
+            or (len(args) > 1 and args[1] == tray_layout.TRAY and args[0] in ('drop', 'place', 'toggle'))
+            or (args[0] == 'intray' and len(args) > 2 and args[2] == tray_layout.TRAY)):
+        return tray_action(args)
     p = subprocess.run([str(CORE)] + args, capture_output=True, text=True)
     if p.returncode:
         raise RuntimeError((p.stderr or p.stdout).strip() or 'Bar action failed')
     output = p.stdout.strip()
     if output in ('unknown', 'false', 'unknown plugin') or 'Function not found' in output or 'Target not found' in output:
         raise RuntimeError(output)
+    if args[0] == 'layout':
+        layout = json.loads(output)
+        layout['nativeHost'] = native_host_ready()
+        return json.dumps(layout)
     return output
 
 
@@ -239,7 +376,7 @@ def check_updates(only):
     return reports
 
 
-def update_apply(token):
+def update_apply(token, rescan=True):
     if not re.fullmatch('[a-f0-9]{32}', token):
         raise RuntimeError('Invalid update preview')
     plan = read(DATA / 'updates' / (token + '.json'))
@@ -256,18 +393,51 @@ def update_apply(token):
         git(directory, 'reset', '--hard', plan['old'])
         raise RuntimeError('Update failed validation and was rolled back')
     (DATA / 'updates' / (token + '.json')).unlink()
-    run(['omarchy-shell', 'shell', 'rescanPlugins'])
+    if rescan:
+        run(['omarchy-shell', 'shell', 'rescanPlugins'])
     return f"Updated {plan['id']} to {plan['target'][:10]}"
+
+
+def update_apply_all(tokens):
+    """Apply several reviewed updates in one run: a failure is reported and the
+    rest carry on, Bar Manager's own update goes last (it reloads this panel),
+    and the shell rescans once at the end rather than once per plugin."""
+    plans = []
+    for token in tokens:
+        plan = (read(DATA / 'updates' / (token + '.json'), {}) or {}) if re.fullmatch('[a-f0-9]{32}', token) else {}
+        plans.append((plan.get('id', ''), token))
+    plans.sort(key=lambda p: p[0] == CORE.parent.parent.name)
+    results, applied = [], 0
+    for ident, token in plans:
+        try:
+            update_apply(token, rescan=False)
+            results.append({'id': ident, 'token': token, 'ok': True, 'message': 'Updated'})
+            applied += 1
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            results.append({'id': ident, 'token': token, 'ok': False, 'message': str(e) or 'Update failed'})
+    if applied:
+        run(['omarchy-shell', 'shell', 'rescanPlugins'])
+    return results
 
 
 def dispatch(args):
     cmd = args[0]
+    if cmd == 'widget-settings':
+        return widget_settings(*args[1:4])
     if cmd == 'shortcut':
         result = json.loads(run([sys.executable, str(CORE.parent / 'shortcut.py')] + args[1:]))
         return result.get('message', 'Done')
     if cmd == 'marketplace':
         cache = DATA / 'marketplace.json'
+        refresh = '--refresh' in args[1:]
+
+        def fresh(path):
+            # A saved copy younger than this is used as is; Refresh catalog always downloads.
+            return not refresh and path.is_file() and time.time() - path.stat().st_mtime < 12 * 3600
+
         try:
+            if fresh(cache):
+                raise LookupError('use the saved catalog')
             raw = run(['curl', '-fsSL', '--max-time', '30', '--max-filesize', '16777216', 'https://plugins.omarchy.org/catalog.json'])
             document = json.loads(raw)
             if not isinstance(document.get('plugins'), list):
@@ -276,10 +446,12 @@ def dispatch(args):
         except Exception:
             document = read(cache, {})
             if not document.get('plugins'):
-                raise
+                raise RuntimeError('Could not load the marketplace catalog')
         # Read-only popularity counts the marketplace site shows (views, install-command copies, hearts). Optional.
         stats_cache = DATA / 'marketplace-stats.json'
         try:
+            if fresh(stats_cache):
+                raise LookupError('use the saved counts')
             stats = json.loads(run(['curl', '-fsSL', '--max-time', '15', '--max-filesize', '4194304',
                                     '-H', 'Accept: application/json', 'https://api.omarchyplugins.com/v1/stats']))
             if not isinstance(stats.get('plugins'), dict):
@@ -297,7 +469,7 @@ def dispatch(args):
             if not isinstance(entry, dict): continue
             url = entry.get('repo', '')
             if not isinstance(url, str) or not url.startswith('https://'): continue
-            listing = {key: str(entry.get(key, ''))[:4000] for key in ('id','name','description','author','version','category','license','verificationStatus','verificationCoverage','installNote','previewImage')}
+            listing = {key: str(entry.get(key, ''))[:4000] for key in ('id','name','description','author','version','category','license','verificationStatus','verificationCoverage','installNote','previewImage','kind')}
             listing.update(repo=url, installAvailable=entry.get('installAvailable') is True,
                            installed=(PLUGINS / listing['id'] / 'manifest.json').is_file())
             stars = entry.get('stars')
@@ -336,9 +508,13 @@ def dispatch(args):
         if not (PLUGINS / ident / 'manifest.json').is_file():
             raise RuntimeError('Installed repository uses a different plugin ID. Refresh to place it.')
         manifest = read(PLUGINS / ident / 'manifest.json', {})
-        if 'bar-widget' in manifest.get('kinds', []):
+        kinds = manifest.get('kinds', [])
+        name = manifest.get('name') or ident
+        if 'bar-widget' in kinds:
             core(['place', ident, edge, section])
-        return output + '\nInstalled ' + ident
+            return output + f'\nInstalled {name} on the {edge} bar ({section})'
+        kind = 'a panel' if 'panel' in kinds else 'a background service' if 'service' in kinds else 'not a bar widget'
+        return output + f'\nInstalled {name}. It is {kind}, so it does not go on a bar: open it from SUPER+SPACE or give it a shortcut in Keys'
     if cmd == 'ui-get':
         return json.dumps(read(DATA / 'ui.json', {}))
     if cmd == 'ui-save':
@@ -375,6 +551,8 @@ def dispatch(args):
         return json.dumps(check_updates(only))
     if cmd == 'apply-update':
         return update_apply(args[1])
+    if cmd == 'apply-updates':
+        return json.dumps(update_apply_all(args[1:]))
     if cmd == 'add-plugin':
         url = args[1].strip()
         if not url.startswith(('https://', 'ssh://', 'git@')):
@@ -383,7 +561,7 @@ def dispatch(args):
         return run(['omarchy', 'plugin', 'add', url, '--enable', '--yes'])
     if cmd == 'update':
         raise RuntimeError('Use check-updates, review the preview, then apply-update <token>')
-    if cmd in MUTATIONS:
+    if cmd in MUTATIONS or cmd in ('fork-tray', 'tray-capture', 'tray-release', 'native-drop'):
         before = snapshot()
         history_id = checkpoint(' '.join(args), before)
         try:

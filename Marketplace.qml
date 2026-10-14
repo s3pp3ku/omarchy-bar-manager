@@ -10,9 +10,10 @@ Control {
     background: Rectangle { color: "transparent" }
     required property var manager
     font.family: Style.font.family
-    property string query: ""
-    property string scope: "All"
-    property string sortBy: "Installs"
+    // Kept on the manager so they survive the plugin reload that follows an install.
+    readonly property string query: manager.marketSearch
+    readonly property string scope: manager.marketScope
+    readonly property string sortBy: manager.marketSort
     property string confirmId: ""
     property bool showUrl: false
     property string edge: "bottom"
@@ -33,6 +34,15 @@ Control {
         if (page.sortBy === "Updated") return a.updatedAt === b.updatedAt ? byName : (a.updatedAt < b.updatedAt ? 1 : -1)
         return byName
     })
+    function isWidget(entry) { return !!entry && (!entry.kind || entry.kind.indexOf("Bar widget") >= 0) }
+    function kindNote(entry) {
+        if (!entry || isWidget(entry)) return ""
+        var k = entry.kind
+        if (k === "Panel" || k === "Overlay") return entry.name + " is " + (k === "Panel" ? "a panel" : "an overlay") + ", not a bar widget, so it won't appear on a bar or in the List. Open it from SUPER+SPACE (search \"" + entry.name + "\") or give it a shortcut in Keys."
+        if (k === "Service") return entry.name + " runs in the background, so it won't appear on a bar or in the List."
+        if (k === "Bar") return entry.name + " is a whole bar of its own, so it isn't placed on one of your bars."
+        return entry.name + " is not a bar widget, so it won't appear on a bar or in the List."
+    }
     function num(n) { return Number(n || 0).toLocaleString(Qt.locale(), "f", 0) }
     function openPage(entry) { if (entry && entry.webPage) Qt.openUrlExternally(entry.webPage) }
     function shortDate(iso) {
@@ -68,7 +78,7 @@ Control {
                 Text { Layout.fillWidth: true; text: "Discover plugins and choose where they belong."; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.bodySize; elide: Text.ElideRight }
             }
             Action { text: "Install from URL"; picked: page.showUrl; onClicked: page.showUrl = !page.showUrl }
-            Action { text: "Refresh catalog"; onClicked: manager.act(["marketplace"], "Loading marketplace") }
+            Action { text: "Refresh catalog"; onClicked: manager.act(["marketplace", "--refresh"], "Downloading the latest catalog") }
         }
 
         RowLayout {
@@ -82,11 +92,11 @@ Control {
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
-            Field { Layout.fillWidth: true; placeholderText: "Search by name, author, or category"; onTextChanged: page.query = text }
+            Field { Layout.fillWidth: true; placeholderText: "Search by name, author, or category"; text: manager.marketSearch; onTextChanged: manager.marketSearch = text }
             Seg {
                 options: ["All", "Available", "Installed", "Verified"]
                 current: page.scope
-                onChosen: function(v) { page.scope = v }
+                onChosen: function(v) { manager.marketScope = v }
             }
         }
 
@@ -97,7 +107,7 @@ Control {
             Seg {
                 options: ["Installs", "Stars", "Newest", "Updated", "A–Z"]
                 current: page.sortBy
-                onChosen: function(v) { page.sortBy = v; listing.positionViewAtBeginning() }
+                onChosen: function(v) { manager.marketSort = v; listing.positionViewAtBeginning() }
             }
             Text {
                 Layout.leftMargin: 6
@@ -187,6 +197,7 @@ Control {
                             spacing: 8
                             Text { Layout.fillWidth: true; text: card.modelData.name; color: manager.fg; font.family: Style.font.family; font.pixelSize: Math.max(16, Style.font.body); font.bold: true; elide: Text.ElideRight }
                             Tag { visible: card.modelData.verificationStatus === "verified"; label: "verified"; tone: manager.accent2Text }
+                            Tag { visible: !page.isWidget(card.modelData); label: (card.modelData.kind || "").toLowerCase(); tone: manager.accentText }
                             Tag { visible: !!card.modelData.installed; label: "installed"; tone: manager.good }
                             Text { visible: !card.modelData.installed && !!card.modelData.version; text: card.modelData.version || ""; color: manager.dim; font.family: Style.font.family; font.pixelSize: page.smallSize }
                         }
@@ -261,13 +272,33 @@ Control {
                         Text { visible: !!page.selected; text: page.selected && page.selected.installed ? "Already installed" : "Install"; color: manager.fg; font.family: Style.font.family; font.pixelSize: 16; font.bold: true }
 
                         ColumnLayout {
-                            visible: !!page.selected && !page.selected.installed && page.selected.installAvailable
+                            visible: !!page.selected && !page.selected.installed && page.selected.installAvailable && page.isWidget(page.selected)
                             Layout.fillWidth: true
                             spacing: 10
                             Text { text: "BAR"; color: manager.dim; font.family: Style.font.family; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
                             Seg { options: ["top", "bottom", "left", "right"]; current: page.edge; onChosen: function(v) { page.edge = v } }
                             Text { text: "SECTION"; color: manager.dim; font.family: Style.font.family; font.pixelSize: 11; font.bold: true; font.letterSpacing: 0.8 }
                             Seg { options: ["left", "center", "right"]; current: page.section; onChosen: function(v) { page.section = v } }
+                        }
+                        Rectangle {
+                            visible: !!page.selected && !page.isWidget(page.selected)
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: kindText.implicitHeight + 20
+                            radius: Style.cornerRadius
+                            color: manager.mix(manager.accent2, manager.surface, 0.1)
+                            border.color: manager.accent2; border.width: 1
+                            Text {
+                                id: kindText
+                                x: 12; y: 10; width: parent.width - 24
+                                text: page.kindNote(page.selected)
+                                color: manager.fg; font.family: Style.font.family; font.pixelSize: page.bodySize; wrapMode: Text.WordWrap
+                            }
+                        }
+                        Action {
+                            visible: !!page.selected && !!page.selected.installed && (page.selected.kind === "Panel" || page.selected.kind === "Overlay")
+                            primary: true
+                            text: "Open " + (page.selected ? page.selected.name : "")
+                            onClicked: Quickshell.execDetached(["omarchy-shell", "shell", "toggle", page.selected.id])
                         }
                         Text {
                             Layout.fillWidth: true; visible: !!page.selected && !page.selected.installed
@@ -276,7 +307,7 @@ Control {
                         }
                         Text {
                             visible: !!page.selected && page.confirmId === page.selected.id
-                            Layout.fillWidth: true; text: "Install on the " + page.edge + " bar, " + page.section + " section?"
+                            Layout.fillWidth: true; text: page.isWidget(page.selected) ? "Install on the " + page.edge + " bar, " + page.section + " section?" : "Install " + (page.selected ? page.selected.name : "") + "?"
                             color: manager.fg; font.family: Style.font.family; font.pixelSize: page.bodySize; wrapMode: Text.WordWrap
                         }
                         RowLayout {

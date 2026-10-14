@@ -110,6 +110,10 @@ MIT
 
 Taking a plugin off the main bar remembers its entry (the Tray's widget list, a clock's format and so on) in `~/.local/state/barctl-removed-main-entries.json`, and putting it back restores it.
 
+Moving or hiding a widget also preserves an explicit enabled entry in `shell.json`'s `plugins` list. Omarchy does not inspect `extra-bars.json` when deciding whether an overlay or service is enabled, so a side-bar button alone is not enough. Drops, tray moves and hide/show retain that reference; **Disable** still removes it. Restoring an older saved layout repairs missing references for its side-bar widgets, including tray members.
+
+Extra-bar widgets can save inline options through `bin/barctl widget-settings <id> <edge> '<json-object>'`, including widgets inside extra-bar trays. Settings stay on that bar and survive moving the widget. The main Tray plugin is main-bar-only; drops to extra bars report the restriction without moving anything. Use **+ Tray** for an extra-bar drawer instead.
+
 ## Layouts and Undo
 
 **Layouts** saves named arrangements of all four bars, extra-bar trays, inline widget settings, enabled bar-widget entries, and the remembered hidden widgets and removed bars. Restoring takes two clicks and saves the current layout first. Uninstalled plugins are skipped, and Bar Manager stays accessible. Idle settings, unrelated services, and the active bar implementation are preserved.
@@ -183,3 +187,16 @@ The Marketplace uses the same outlined cards, button groups and filled primary *
 Narrow windows: tabs wrap, the Bars/Position/Tray groups wrap under each plugin's name, and marketplace details open with a Back to plugins button.
 
 Four-bar layout previews grow to fit top and bottom widget sections and scroll when needed.
+
+## Private four-edge Tray
+
+The local `s3pp3ku.tray` fork can move among all four bars with its options,
+drawer widgets and ordering intact. Edge toggles support separate instances;
+moves to an occupied edge are rejected without overwriting it. Hosted widget
+settings are saved on the correct edge, including rich drawer wrappers.
+The native host supports service-dependent drawer widgets with one shared
+service per plugin; the legacy host retains the safe capture restriction.
+Native `tray:*` drawers can also be created and moved on the main edge.
+Actual native bar drags use occurrence-scoped moves, preserving same-id
+copies on other edges. The original author's plugin stays untouched.
+Run `python3 -m unittest discover -s tests -v` for the regression suite.
